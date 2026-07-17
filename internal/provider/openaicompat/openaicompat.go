@@ -31,24 +31,60 @@ func (c *Client) model(req provider.Request) string {
 	return c.Model
 }
 
+// buildMessages converts loyi messages into OpenAI chat format.
+func buildMessages(system string, msgs []provider.Message) []map[string]any {
+	out := make([]map[string]any, 0, len(msgs)+1)
+	if system != "" {
+		out = append(out, map[string]any{"role": "system", "content": system})
+	}
+	for _, m := range msgs {
+		switch {
+		case m.ToolCallID != "":
+			out = append(out, map[string]any{
+				"role": "tool", "tool_call_id": m.ToolCallID, "content": m.ToolResult,
+			})
+		case m.Role == provider.RoleAssistant && len(m.ToolCalls) > 0:
+			calls := make([]map[string]any, 0, len(m.ToolCalls))
+			for _, tc := range m.ToolCalls {
+				calls = append(calls, map[string]any{
+					"id": tc.ID, "type": "function",
+					"function": map[string]any{"name": tc.Name, "arguments": string(tc.Input)},
+				})
+			}
+			msg := map[string]any{"role": "assistant", "tool_calls": calls}
+			if m.Content != "" {
+				msg["content"] = m.Content
+			}
+			out = append(out, msg)
+		default:
+			out = append(out, map[string]any{"role": string(m.Role), "content": m.Content})
+		}
+	}
+	return out
+}
+
 func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provider.Chunk, error) {
 	model := c.model(req)
 	if model == "" {
 		return nil, fmt.Errorf("%s: no model configured", c.ID)
 	}
 
-	msgs := make([]map[string]string, 0, len(req.Messages)+1)
-	if req.System != "" {
-		msgs = append(msgs, map[string]string{"role": "system", "content": req.System})
-	}
-	for _, m := range req.Messages {
-		msgs = append(msgs, map[string]string{"role": string(m.Role), "content": m.Content})
-	}
-
 	body := map[string]any{
 		"model":    model,
-		"messages": msgs,
+		"messages": buildMessages(req.System, req.Messages),
 		"stream":   true,
+	}
+	if len(req.Tools) > 0 {
+		tools := make([]map[string]any, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			tools = append(tools, map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name": t.Name, "description": t.Description, "parameters": t.Schema,
+				},
+			})
+		}
+		body["tools"] = tools
 	}
 	if req.Effort != "" {
 		body["reasoning_effort"] = string(req.Effort)
@@ -80,6 +116,8 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	go func() {
 		defer close(out)
 		defer res.Body.Close()
+		acc := map[int]*provider.ToolCall{}
+		var order []int
 		err := provider.SSEData(res.Body, func(data string) bool {
 			if data == "[DONE]" {
 				return false
@@ -87,7 +125,15 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 			var ev struct {
 				Choices []struct {
 					Delta struct {
-						Content string `json:"content"`
+						Content   string `json:"content"`
+						ToolCalls []struct {
+							Index    int    `json:"index"`
+							ID       string `json:"id"`
+							Function struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							} `json:"function"`
+						} `json:"tool_calls"`
 					} `json:"delta"`
 				} `json:"choices"`
 				Error *struct {
@@ -101,8 +147,27 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 				out <- provider.Chunk{Err: fmt.Errorf("%s: %s", c.ID, ev.Error.Message)}
 				return false
 			}
-			if len(ev.Choices) > 0 && ev.Choices[0].Delta.Content != "" {
-				out <- provider.Chunk{Text: ev.Choices[0].Delta.Content}
+			if len(ev.Choices) == 0 {
+				return true
+			}
+			d := ev.Choices[0].Delta
+			if d.Content != "" {
+				out <- provider.Chunk{Text: d.Content}
+			}
+			for _, tc := range d.ToolCalls {
+				call := acc[tc.Index]
+				if call == nil {
+					call = &provider.ToolCall{}
+					acc[tc.Index] = call
+					order = append(order, tc.Index)
+				}
+				if tc.ID != "" {
+					call.ID = tc.ID
+				}
+				if tc.Function.Name != "" {
+					call.Name = tc.Function.Name
+				}
+				call.Input = append(call.Input, tc.Function.Arguments...)
 			}
 			return true
 		})
@@ -110,7 +175,15 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 			out <- provider.Chunk{Err: err}
 			return
 		}
-		out <- provider.Chunk{Done: true}
+		calls := make([]provider.ToolCall, 0, len(order))
+		for _, i := range order {
+			c := acc[i]
+			if len(c.Input) == 0 {
+				c.Input = json.RawMessage("{}")
+			}
+			calls = append(calls, *c)
+		}
+		out <- provider.Chunk{ToolCalls: calls, Done: true}
 	}()
 	return out, nil
 }

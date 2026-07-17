@@ -10,9 +10,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/loveranmar/loyi/internal/agent"
 	"github.com/loveranmar/loyi/internal/config"
 	"github.com/loveranmar/loyi/internal/provider"
 	"github.com/loveranmar/loyi/internal/provider/factory"
+	"github.com/loveranmar/loyi/internal/theme"
+	"github.com/loveranmar/loyi/internal/tool"
 	"github.com/loveranmar/loyi/internal/tui"
 )
 
@@ -48,16 +51,48 @@ func main() {
 		fatal(fmt.Errorf("reading config: %w", err))
 	}
 
-	fmt.Printf("hi %s — try `loyi ask \"...\"` or `loyi setup`.\n", cfg.Name)
+	runChat(cfg)
+}
+
+func runChat(cfg *config.Config) {
+	if cfg.DefaultProvider == "" {
+		fatal(fmt.Errorf("no provider configured — run `loyi setup`"))
+	}
+	ctx := context.Background()
+	p, err := factory.Build(ctx, cfg, cfg.DefaultProvider)
+	if err != nil {
+		fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fatal(err)
+	}
+	ws, err := tool.NewWorkspace(cwd)
+	if err != nil {
+		fatal(err)
+	}
+	reg := tool.NewRegistry(
+		&tool.ReadTool{WS: ws}, &tool.WriteTool{WS: ws}, &tool.EditTool{WS: ws},
+		&tool.TreeTool{WS: ws}, &tool.LsTool{WS: ws}, &tool.GrepTool{WS: ws}, &tool.RunTool{WS: ws},
+	)
+	sess := &agent.Session{
+		Provider:  p,
+		Tools:     reg,
+		Agent:     agent.AgentByID(agent.DefaultAgentID),
+		Workspace: ws.Root,
+	}
+	if _, err := tea.NewProgram(tui.NewChat(cfg, sess, theme.Get(cfg.Theme))).Run(); err != nil {
+		fatal(err)
+	}
 }
 
 func usage() {
 	fmt.Println(`loyi — your agentic cli, for people who actually ship.
 
 usage:
-  loyi                 first run: onboarding. after that: status.
+  loyi                 open the interactive coding agent (onboarding on first run)
   loyi ask [flags] "prompt"
-                       ask the configured model a question
+                       one-shot: ask the configured model a question
       -p provider      provider to use (default: your default provider)
       -m model         model override
       -e effort        low | medium | high

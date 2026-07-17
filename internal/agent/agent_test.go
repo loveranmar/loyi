@@ -1,0 +1,171 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/loveranmar/loyi/internal/provider"
+	"github.com/loveranmar/loyi/internal/tool"
+)
+
+// scriptProvider returns a pre-baked sequence of turns, one per Stream call.
+type scriptProvider struct {
+	turns [][]provider.Chunk
+	n     int
+	last  provider.Request
+}
+
+func (p *scriptProvider) Name() string { return "script" }
+func (p *scriptProvider) Stream(_ context.Context, req provider.Request) (<-chan provider.Chunk, error) {
+	p.last = req
+	ch := make(chan provider.Chunk, 8)
+	turn := p.turns[p.n]
+	p.n++
+	go func() {
+		for _, c := range turn {
+			ch <- c
+		}
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func newTestSession(t *testing.T, root string, turns [][]provider.Chunk) *Session {
+	t.Helper()
+	ws, err := tool.NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := tool.NewRegistry(
+		&tool.ReadTool{WS: ws}, &tool.WriteTool{WS: ws}, &tool.EditTool{WS: ws},
+		&tool.TreeTool{WS: ws}, &tool.LsTool{WS: ws}, &tool.GrepTool{WS: ws}, &tool.RunTool{WS: ws},
+	)
+	return &Session{
+		Provider:  &scriptProvider{turns: turns},
+		Tools:     reg,
+		Agent:     AgentByID("build"),
+		Workspace: root,
+	}
+}
+
+func collect(s *Session, input string, approve bool) []Event {
+	var events []Event
+	s.Run(context.Background(), input, func(e Event) {
+		if pe, ok := e.(PermissionEvent); ok {
+			pe.Reply <- approve
+			events = append(events, e)
+			return
+		}
+		events = append(events, e)
+	})
+	return events
+}
+
+func TestWriteToolFlowApproved(t *testing.T) {
+	dir := t.TempDir()
+	call := provider.ToolCall{
+		ID: "t1", Name: "write",
+		Input: json.RawMessage(`{"path":"hello.txt","content":"hi there\n"}`),
+	}
+	turns := [][]provider.Chunk{
+		{{Text: "Creating the file."}, {Done: true, ToolCalls: []provider.ToolCall{call}}},
+		{{Text: "Done — wrote hello.txt."}, {Done: true}},
+	}
+	s := newTestSession(t, dir, turns)
+	events := collect(s, "make a hello file", true)
+
+	// permission was requested
+	if !hasEvent[PermissionEvent](events) {
+		t.Fatal("expected a permission prompt for write")
+	}
+	// file actually got written
+	got, err := os.ReadFile(filepath.Join(dir, "hello.txt"))
+	if err != nil || string(got) != "hi there\n" {
+		t.Fatalf("file not written correctly: %q err=%v", got, err)
+	}
+	if !hasEvent[DoneEvent](events) {
+		t.Error("expected a done event")
+	}
+	if s.Usage().ToolCalls != 1 {
+		t.Errorf("tool calls = %d, want 1", s.Usage().ToolCalls)
+	}
+}
+
+func TestWriteToolFlowDenied(t *testing.T) {
+	dir := t.TempDir()
+	call := provider.ToolCall{
+		ID: "t1", Name: "write",
+		Input: json.RawMessage(`{"path":"nope.txt","content":"x"}`),
+	}
+	turns := [][]provider.Chunk{
+		{{Done: true, ToolCalls: []provider.ToolCall{call}}},
+		{{Text: "Okay, I won't."}, {Done: true}},
+	}
+	s := newTestSession(t, dir, turns)
+	collect(s, "write a file", false)
+
+	if _, err := os.Stat(filepath.Join(dir, "nope.txt")); !os.IsNotExist(err) {
+		t.Error("file should not exist after denial")
+	}
+	// the model should have been told it was declined
+	if !strings.Contains(lastToolResult(s), "declined") {
+		t.Error("expected a 'declined' tool result fed back to the model")
+	}
+}
+
+func TestReadToolNoPermission(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("line one\nline two\n"), 0o644)
+	call := provider.ToolCall{ID: "r1", Name: "read", Input: json.RawMessage(`{"path":"a.txt"}`)}
+	turns := [][]provider.Chunk{
+		{{Done: true, ToolCalls: []provider.ToolCall{call}}},
+		{{Text: "It has two lines."}, {Done: true}},
+	}
+	s := newTestSession(t, dir, turns)
+	events := collect(s, "read a.txt", false)
+
+	if hasEvent[PermissionEvent](events) {
+		t.Error("read should not require permission")
+	}
+	if !strings.Contains(lastToolResult(s), "line one") {
+		t.Error("read output not fed back")
+	}
+}
+
+func TestToolsAdvertisedToProvider(t *testing.T) {
+	dir := t.TempDir()
+	turns := [][]provider.Chunk{{{Text: "hi"}, {Done: true}}}
+	s := newTestSession(t, dir, turns)
+	collect(s, "hello", false)
+	sp := s.Provider.(*scriptProvider)
+	if len(sp.last.Tools) != 7 {
+		t.Errorf("advertised %d tools, want 7", len(sp.last.Tools))
+	}
+	if !strings.Contains(sp.last.System, "loyi") {
+		t.Error("system prompt should mention loyi")
+	}
+}
+
+// helpers
+
+func hasEvent[T Event](events []Event) bool {
+	for _, e := range events {
+		if _, ok := e.(T); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func lastToolResult(s *Session) string {
+	for i := len(s.history) - 1; i >= 0; i-- {
+		if s.history[i].ToolCallID != "" {
+			return s.history[i].ToolResult
+		}
+	}
+	return ""
+}

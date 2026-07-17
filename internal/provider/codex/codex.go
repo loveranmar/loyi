@@ -59,15 +59,25 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 
 	input := make([]map[string]any, 0, len(req.Messages))
 	for _, m := range req.Messages {
+		// Tools aren't wired for the Codex backend yet; fold any tool result
+		// back in as user text so the conversation stays coherent.
+		role := string(m.Role)
+		text := m.Content
+		if m.ToolCallID != "" {
+			role, text = "user", "tool result:\n"+m.ToolResult
+		}
+		if text == "" {
+			continue
+		}
 		contentType := "input_text"
-		if m.Role == provider.RoleAssistant {
+		if m.Role == provider.RoleAssistant && m.ToolCallID == "" {
 			contentType = "output_text"
 		}
 		input = append(input, map[string]any{
 			"type": "message",
-			"role": string(m.Role),
+			"role": role,
 			"content": []map[string]string{
-				{"type": contentType, "text": m.Content},
+				{"type": contentType, "text": text},
 			},
 		})
 	}
