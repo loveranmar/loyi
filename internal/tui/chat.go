@@ -12,25 +12,26 @@ import (
 
 	"github.com/loveranmar/loyi/internal/agent"
 	"github.com/loveranmar/loyi/internal/config"
+	"github.com/loveranmar/loyi/internal/mascot"
 	"github.com/loveranmar/loyi/internal/theme"
 )
 
 // eventMsg wraps an agent event for the bubbletea loop.
 type eventMsg struct{ ev agent.Event }
-type tickMsg struct{}
 
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+// mascotRestMsg returns the mascot to idle after a success/error flash.
+type mascotRestMsg struct{}
 
 // Chat is loyi's interactive coding interface: a scrolling conversation with
 // the agent, inline (not altscreen) so history stays in the terminal.
 type Chat struct {
-	cfg     *config.Config
-	sess    *agent.Session
-	th      theme.Theme
-	s       theme.Styles
-	input   textinput.Model
-	width   int
-	spinner int
+	cfg   *config.Config
+	sess  *agent.Session
+	th    theme.Theme
+	s     theme.Styles
+	input textinput.Model
+	pup   mascot.Model
+	width int
 
 	events   chan agent.Event
 	working  bool
@@ -59,6 +60,7 @@ func NewChat(cfg *config.Config, sess *agent.Session, th theme.Theme) *Chat {
 		th:     th,
 		s:      th.Styles(),
 		input:  in,
+		pup:    mascot.New(mascot.Mini, th),
 		events: make(chan agent.Event, 64),
 	}
 	st := textinput.DefaultDarkStyles()
@@ -72,7 +74,7 @@ func NewChat(cfg *config.Config, sess *agent.Session, th theme.Theme) *Chat {
 }
 
 func (c *Chat) Init() tea.Cmd {
-	return tea.Batch(c.input.Focus(), tea.Println(c.banner()))
+	return tea.Batch(c.input.Focus(), tea.Println(c.banner()), c.pup.Init())
 }
 
 func (c *Chat) banner() string {
@@ -80,8 +82,10 @@ func (c *Chat) banner() string {
 	if who == "" {
 		who = "there"
 	}
-	return "\n" + c.s.Accent.Render("loyi") + c.s.Dim.Render(" · "+c.sess.Agent.Label+" · "+c.cfg.DefaultProvider) +
-		"\n" + c.s.Dim.Render(fmt.Sprintf("hey %s. describe what you want to build, or /help for commands.", who))
+	pup := mascot.Render(mascot.Full, mascot.Idle, c.th)
+	head := c.s.Accent.Render("loyi") + c.s.Dim.Render(" · "+c.sess.Agent.Label+" · "+c.cfg.DefaultProvider)
+	sub := c.s.Dim.Render(fmt.Sprintf("hey %s. describe what you want to build, or /help for commands.", who))
+	return "\n" + pup + "\n\n" + head + "\n" + sub
 }
 
 func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -91,10 +95,14 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.input.SetWidth(msg.Width - 4)
 		return c, nil
 
-	case tickMsg:
-		if c.working {
-			c.spinner++
-			return c, c.tick()
+	case mascot.TickMsg:
+		var cmd tea.Cmd
+		c.pup, cmd = c.pup.Update(msg)
+		return c, cmd
+
+	case mascotRestMsg:
+		if !c.working && (c.pup.State() == mascot.Success || c.pup.State() == mascot.Error) {
+			return c, c.pup.SetState(mascot.Idle)
 		}
 		return c, nil
 
@@ -112,27 +120,32 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Permission prompt takes over the keyboard.
 	if c.pending != nil {
+		resume := func(extra ...tea.Cmd) tea.Cmd {
+			cmds := append(extra, c.pup.SetState(mascot.Thinking), c.waitEvent())
+			return tea.Sequence(cmds...)
+		}
 		switch key {
 		case "y", "enter":
 			c.pending.Reply <- true
 			c.pending = nil
-			return c, c.waitEvent()
+			return c, resume()
 		case "a":
 			c.sess.AutoApprove = true
 			c.pending.Reply <- true
 			c.pending = nil
-			return c, tea.Sequence(tea.Println(c.s.Dim.Render("  auto-approving tool calls for this session")), c.waitEvent())
+			return c, resume(tea.Println(c.s.Dim.Render("  auto-approving tool calls for this session")))
 		case "n", "esc":
 			c.pending.Reply <- false
 			c.pending = nil
-			return c, c.waitEvent()
+			return c, resume()
 		case "ctrl+c":
 			c.pending.Reply <- false
 			c.pending = nil
+			c.stopLoop()
 			if c.cancel != nil {
 				c.cancel()
 			}
-			return c, nil
+			return c, c.pup.SetState(mascot.Idle)
 		}
 		return c, nil
 	}
@@ -142,7 +155,7 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if c.working && c.cancel != nil {
 			c.stopLoop()
 			c.cancel()
-			return c, tea.Println(c.s.Dim.Render("  interrupted"))
+			return c, tea.Sequence(tea.Println(c.s.Dim.Render("  interrupted")), c.pup.SetState(mascot.Idle))
 		}
 		c.quit = true
 		return c, tea.Quit
@@ -178,7 +191,6 @@ func (c *Chat) startTurn(text string) (tea.Model, tea.Cmd) {
 // starting the event pump. echo may be empty for a silent (loop) step.
 func (c *Chat) beginTurn(text, echo string) tea.Cmd {
 	c.working = true
-	c.spinner = 0
 	c.stream.Reset()
 	c.toolLine = ""
 
@@ -190,7 +202,7 @@ func (c *Chat) beginTurn(text, echo string) tea.Cmd {
 		sess.Run(ctx, text, func(e agent.Event) { events <- e })
 	}()
 
-	cmds := []tea.Cmd{c.waitEvent(), c.tick()}
+	cmds := []tea.Cmd{c.waitEvent(), c.pup.SetState(mascot.Thinking)}
 	if echo != "" {
 		cmds = append([]tea.Cmd{tea.Println(echo)}, cmds...)
 	}
@@ -231,8 +243,9 @@ func (c *Chat) waitEvent() tea.Cmd {
 	return func() tea.Msg { return eventMsg{<-c.events} }
 }
 
-func (c *Chat) tick() tea.Cmd {
-	return tea.Tick(90*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
+// restMascot flashes success/error, then returns the pup to idle after a beat.
+func restMascot() tea.Cmd {
+	return tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg { return mascotRestMsg{} })
 }
 
 func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
@@ -259,7 +272,7 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 	case agent.PermissionEvent:
 		c.pending = &e
 		c.toolLine = ""
-		return c, nil // wait for keypress, not another event
+		return c, c.pup.SetState(mascot.Listening) // your turn
 
 	case agent.DoneEvent:
 		c.working = false
@@ -272,9 +285,9 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 		}
 		if cont := c.loopNext(final); cont != nil {
 			cmds = append(cmds, cont)
-		}
-		if len(cmds) == 0 {
-			return c, nil
+		} else {
+			// no more loop work — flash success, then settle back to idle
+			cmds = append(cmds, c.pup.SetState(mascot.Success), restMascot())
 		}
 		return c, tea.Sequence(cmds...)
 
@@ -287,7 +300,8 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, tea.Println(c.s.Text.Render(s)))
 			c.stream.Reset()
 		}
-		cmds = append(cmds, tea.Println(c.s.Accent.Render("  ✗ ")+c.s.Dim.Render(e.Err.Error())))
+		cmds = append(cmds, tea.Println(c.s.Danger.Render("  ✗ ")+c.s.Dim.Render(e.Err.Error())))
+		cmds = append(cmds, c.pup.SetState(mascot.Error), restMascot())
 		return c, tea.Sequence(cmds...)
 	}
 	return c, c.waitEvent()
@@ -325,15 +339,13 @@ func (c *Chat) View() tea.View {
 
 	switch {
 	case c.pending != nil:
-		b.WriteString("\n" + c.permissionPrompt())
+		b.WriteString("\n" + c.pup.View() + "  " + c.permissionPrompt())
 	case c.toolLine != "":
-		frame := spinnerFrames[c.spinner%len(spinnerFrames)]
-		b.WriteString(c.s.Accent.Render("  "+frame) + " " + c.s.Dim.Render(c.toolLine))
+		b.WriteString(c.pup.View() + " " + c.s.Dim.Render(c.toolLine))
 	case c.working:
-		frame := spinnerFrames[c.spinner%len(spinnerFrames)]
-		b.WriteString(c.s.Accent.Render("  "+frame) + " " + c.s.Dim.Render("thinking"))
+		b.WriteString(c.pup.View() + " " + c.s.Dim.Render("thinking"))
 	default:
-		b.WriteString(c.input.View())
+		b.WriteString(c.pup.View() + " " + c.input.View())
 	}
 
 	v := tea.NewView(b.String())
@@ -342,6 +354,6 @@ func (c *Chat) View() tea.View {
 
 func (c *Chat) permissionPrompt() string {
 	q := c.s.Text.Render("allow ") + c.s.Accent.Render(c.pending.Summary) + c.s.Text.Render(" ?")
-	opts := c.s.Dim.Render("  [y] yes   [n] no   [a] always")
-	return q + "\n" + opts
+	opts := c.s.Dim.Render("   [y] yes   [n] no   [a] always")
+	return q + opts
 }

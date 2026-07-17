@@ -12,6 +12,7 @@ import (
 
 	"github.com/loveranmar/loyi/internal/agent"
 	"github.com/loveranmar/loyi/internal/config"
+	"github.com/loveranmar/loyi/internal/mascot"
 	"github.com/loveranmar/loyi/internal/provider"
 	"github.com/loveranmar/loyi/internal/provider/factory"
 	"github.com/loveranmar/loyi/internal/theme"
@@ -26,7 +27,7 @@ func main() {
 	if len(args) > 0 {
 		switch args[0] {
 		case "version", "--version", "-v":
-			fmt.Println("loyi " + version)
+			printVersion()
 			return
 		case "setup":
 			runSetup()
@@ -52,6 +53,19 @@ func main() {
 	}
 
 	runChat(cfg)
+}
+
+func printVersion() {
+	th := theme.Default
+	if cfg, err := config.Load(); err == nil {
+		th = theme.Get(cfg.Theme)
+	}
+	s := th.Styles()
+	fmt.Println()
+	fmt.Println(mascot.Render(mascot.Full, mascot.Idle, th))
+	fmt.Println()
+	fmt.Println("  " + s.Accent.Render("loyi") + " " + s.Dim.Render(version))
+	fmt.Println("  " + s.Dim.Render("your agentic cli, for people who actually ship."))
 }
 
 func runChat(cfg *config.Config) {

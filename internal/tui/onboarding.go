@@ -16,6 +16,7 @@ import (
 
 	"github.com/loveranmar/loyi/internal/auth"
 	"github.com/loveranmar/loyi/internal/config"
+	"github.com/loveranmar/loyi/internal/mascot"
 	"github.com/loveranmar/loyi/internal/theme"
 )
 
@@ -577,7 +578,8 @@ func (o *Onboarding) wrap(s string) string {
 }
 
 func (o *Onboarding) viewSplash() string {
-	art := o.s.Accent.Render(logo) + "\n\n" + o.s.Dim.Render(tagline)
+	pup := mascot.Render(mascot.Full, mascot.Idle, o.th)
+	art := o.s.Accent.Render(logo) + "\n\n" + pup + "\n\n" + o.s.Dim.Render(tagline)
 	if o.width > 0 && o.height > 0 {
 		return lipgloss.Place(o.width, o.height, lipgloss.Center, lipgloss.Center, art)
 	}
@@ -669,6 +671,7 @@ func (o *Onboarding) viewDone() string {
 	if name == "" {
 		name = "you"
 	}
+	lines = append(lines, mascot.Render(mascot.Full, mascot.Success, o.th), "")
 	lines = append(lines, o.s.Text.Render(fmt.Sprintf("alright, %s. you're set.", name)))
 
 	ids := make([]string, 0, len(o.cfg.Providers))
@@ -688,5 +691,5 @@ func (o *Onboarding) viewDone() string {
 	if o.saveErr != nil {
 		lines = append(lines, "", o.s.Text.Render("couldn't save config: "+o.saveErr.Error()))
 	}
-	return o.page("", strings.Join(lines, "\n"), "press any key to start shipping — try: loyi ask \"hello\"")
+	return o.page("", strings.Join(lines, "\n"), "press any key to start shipping — then just run: loyi")
 }

@@ -22,6 +22,10 @@ var Neutrals = NeutralRamp{
 	Background: "#1A1815",
 }
 
+// Danger is the shared terracotta used for errors and failure states. It is
+// constant across themes (even when a theme's accent is a different color).
+const Danger = "#C4614B"
+
 type Theme struct {
 	Name   string
 	Accent string
@@ -64,6 +68,7 @@ type Styles struct {
 	Text   lipgloss.Style
 	Dim    lipgloss.Style
 	Accent lipgloss.Style
+	Danger lipgloss.Style
 }
 
 // Styles builds the style set for this theme.
@@ -72,5 +77,6 @@ func (t Theme) Styles() Styles {
 		Text:   lipgloss.NewStyle().Foreground(lipgloss.Color(Neutrals.Text)),
 		Dim:    lipgloss.NewStyle().Foreground(lipgloss.Color(Neutrals.Dim)),
 		Accent: lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)),
+		Danger: lipgloss.NewStyle().Foreground(lipgloss.Color(Danger)),
 	}
 }
