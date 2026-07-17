@@ -131,8 +131,26 @@ func isFileEdit(name string) bool { return name == "write" || name == "edit" }
 
 func (s *Session) Usage() Usage { return s.usage }
 
-// SwitchAgent changes the active persona for subsequent turns.
-func (s *Session) SwitchAgent(a Agent) { s.Agent = a }
+// SwitchAgent changes the active persona for subsequent turns. If the agent
+// declares a permission posture, it's applied; otherwise the current mode
+// stays.
+func (s *Session) SwitchAgent(a Agent) {
+	s.Agent = a
+	if a.Perm != "" {
+		s.Perm = a.Perm
+	}
+}
+
+// allowedTools returns the registered tools the active agent may use.
+func (s *Session) allowedTools() []tool.Tool {
+	var out []tool.Tool
+	for _, t := range s.Tools.List() {
+		if s.Agent.AllowsTool(t.Name()) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 // Reset clears the conversation history (keeps config).
 func (s *Session) Reset() {
@@ -141,12 +159,18 @@ func (s *Session) Reset() {
 }
 
 func (s *Session) system() string {
-	return BuildSystem(s.Agent, s.Workspace, s.Tools.Names())
+	allowed := s.allowedTools()
+	names := make([]string, 0, len(allowed))
+	for _, t := range allowed {
+		names = append(names, t.Name())
+	}
+	return BuildSystem(s.Agent, s.Workspace, names)
 }
 
 func (s *Session) toolDefs() []provider.ToolDef {
-	defs := make([]provider.ToolDef, 0, len(s.Tools.List()))
-	for _, t := range s.Tools.List() {
+	allowed := s.allowedTools()
+	defs := make([]provider.ToolDef, 0, len(allowed))
+	for _, t := range allowed {
 		defs = append(defs, provider.ToolDef{
 			Name: t.Name(), Description: t.Description(), Schema: t.Schema(),
 		})
@@ -222,6 +246,10 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 			t, ok := s.Tools.Get(tc.Name)
 			if !ok {
 				s.appendToolResult(tc.ID, fmt.Sprintf("unknown tool %q", tc.Name), true, emit)
+				continue
+			}
+			if !s.Agent.AllowsTool(tc.Name) {
+				s.appendToolResult(tc.ID, fmt.Sprintf("the %s tool isn't available in %s mode", tc.Name, s.Agent.Label), true, emit)
 				continue
 			}
 			summary := t.Summary(tc.Input)

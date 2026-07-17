@@ -1,14 +1,46 @@
 package agent
 
-// Agent is a persona: a named system-prompt specialization the user switches
-// between. loyi's agents map to the arc of shipping a product, not to
-// technical roles — the tool is for people building a business, not demos.
+// Agent is a persona: a named specialization the user switches between. Beyond
+// a system prompt, an agent carries its own toolset, its default permission
+// posture, and (for orchestration) which sub-agents it may spawn. loyi's agents
+// map to the arc of shipping a product, not to technical roles — the tool is
+// for people building a business, not demos.
 type Agent struct {
 	ID      string
 	Label   string // shown in the UI, lowercase
 	Tagline string // one line, shown in the picker
 	Prompt  string // persona-specific system prompt, appended to the base
+
+	// Tools is the set of tool names this agent may use. Empty means all
+	// registered tools.
+	Tools []string
+	// Perm is the permission posture this agent switches to. Empty leaves the
+	// current mode untouched.
+	Perm Perm
+	// Spawns lists the sub-agent ids this agent is allowed to launch. Reserved
+	// for orchestration; empty means it works solo.
+	Spawns []string
 }
+
+// AllowsTool reports whether the agent may use a tool by name.
+func (a Agent) AllowsTool(name string) bool {
+	if len(a.Tools) == 0 {
+		return true
+	}
+	for _, t := range a.Tools {
+		if t == name {
+			return true
+		}
+	}
+	return false
+}
+
+// readOnly is the safe, non-mutating toolset: look but don't touch.
+var readOnly = []string{"read", "tree", "ls", "grep", "glob", "web_search", "web_fetch"}
+
+// planning adds file writing to the read-only set so a plan can be committed to
+// disk, but withholds run — planning shouldn't be executing.
+var planning = append(append([]string{}, readOnly...), "write", "edit")
 
 // Agents is the founder-journey lineup, in order. Build is the default.
 var Agents = []Agent{
@@ -16,6 +48,7 @@ var Agents = []Agent{
 		ID:      "plan",
 		Label:   "plan",
 		Tagline: "validate the idea and turn it into a concrete build plan",
+		Tools:   planning,
 		Prompt: `You are loyi in PLAN mode — a pragmatic technical co-founder.
 
 The user is building a real product to make money, not a demo. Your job is to
@@ -28,7 +61,8 @@ turn a fuzzy idea into a concrete, buildable plan:
 
 Use the read/tree/grep tools to ground the plan in whatever already exists in
 the workspace. Prefer writing the plan to a file (like PLAN.md) so it's real.
-Be direct and opinionated. Recommend, don't survey.`,
+You can't run commands in this mode — that's build's job. Be direct and
+opinionated. Recommend, don't survey.`,
 	},
 	{
 		ID:      "build",
@@ -62,17 +96,40 @@ The build is the easy part; shipping is where products die. Help with:
 Use the tools to actually create these artifacts in the workspace (landing page,
 deploy config, README, launch notes). Bias toward done and live over perfect.`,
 	},
+	{
+		ID:      "pm",
+		Label:   "pm",
+		Tagline: "knows the whole plan — ask what's next",
+		Tools:   readOnly,
+		Prompt: `You are loyi in PM mode — the product lead who holds the whole picture.
+
+You don't write code. You read the repo, the plan, and the progress, and you
+tell the user where they are and what to do next. When asked:
+- Give a straight answer to "what's the next step?" — one concrete thing, not a
+  list of maybes.
+- Ground everything in what's actually in the workspace (read PLAN.md, the code,
+  the README, recent files). If the plan and the code disagree, say so.
+- Keep the user honest about scope and what actually moves them toward shipping
+  and getting paid.
+
+You have read-only tools. You advise and direct; build mode does the work.`,
+	},
 }
 
 // DefaultAgentID is the agent a fresh session starts on.
 const DefaultAgentID = "build"
 
-// AgentByID returns the named agent, falling back to the default.
+// AgentByID returns the named agent, or the default if the id is unknown.
 func AgentByID(id string) Agent {
 	for _, a := range Agents {
 		if a.ID == id {
 			return a
 		}
 	}
-	return AgentByID(DefaultAgentID)
+	for _, a := range Agents {
+		if a.ID == DefaultAgentID {
+			return a
+		}
+	}
+	return Agents[0]
 }

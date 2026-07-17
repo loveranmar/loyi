@@ -48,7 +48,7 @@ func (c *Chat) runCommand(line string) (tea.Model, tea.Cmd) {
 func (c *Chat) helpText() string {
 	lines := []struct{ cmd, desc string }{
 		{"/help", "show this list"},
-		{"/agent [id]", "switch persona: plan · build · ship (no id lists them)"},
+		{"/agent [id]", "switch persona: plan · build · ship · pm (no id opens the picker)"},
 		{"/effort [low|medium|high]", "reasoning effort (no arg shows current)"},
 		{"/permission [mode]", "how edits are gated: ask · accept-edits · auto · bypass"},
 		{"/model [id]", "pick a model (no id opens the picker across all providers)"},
@@ -91,20 +91,19 @@ func (c *Chat) usageText() string {
 }
 
 func (c *Chat) agentCommand(args []string) (tea.Model, tea.Cmd) {
+	if c.working {
+		return c, tea.Println(indent(c.s.Dim.Render("wait for the current turn to finish")))
+	}
 	if len(args) == 0 {
-		var b strings.Builder
-		b.WriteString("\n" + c.s.Text.Render("agents") + c.s.Dim.Render("  (you're on "+c.sess.Agent.Label+")") + "\n")
-		for _, a := range agent.Agents {
-			marker := "  "
-			label := c.s.Dim.Render(padTo(a.Label, 10))
+		// open the interactive picker on the current agent
+		c.agentPickerActive = true
+		c.agentPickerIdx = 0
+		for i, a := range agent.Agents {
 			if a.ID == c.sess.Agent.ID {
-				marker = c.s.Accent.Render("› ")
-				label = c.s.Text.Render(padTo(a.Label, 10))
+				c.agentPickerIdx = i
 			}
-			b.WriteString(marker + label + c.s.Dim.Render(a.Tagline) + "\n")
 		}
-		b.WriteString(c.s.Dim.Render("  switch with /agent <id>"))
-		return c, tea.Println(strings.TrimRight(b.String(), "\n"))
+		return c, nil
 	}
 	id := args[0]
 	for _, a := range agent.Agents {

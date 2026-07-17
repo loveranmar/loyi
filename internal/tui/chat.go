@@ -67,6 +67,10 @@ type Chat struct {
 	pickerEntries []factory.ModelEntry
 	pickerIdx     int
 
+	// agent picker state
+	agentPickerActive bool
+	agentPickerIdx    int
+
 	events   chan agent.Event
 	working  bool
 	stream   strings.Builder // assistant text for the current segment
@@ -283,6 +287,24 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return c.pickModel(c.pickerEntries[c.pickerIdx])
 		case "esc", "ctrl+c", "q":
 			c.pickerActive = false
+		}
+		return c, nil
+	}
+
+	// Agent picker takes over the keyboard.
+	if c.agentPickerActive {
+		switch key {
+		case "up", "k":
+			c.agentPickerIdx = (c.agentPickerIdx + len(agent.Agents) - 1) % len(agent.Agents)
+		case "down", "j":
+			c.agentPickerIdx = (c.agentPickerIdx + 1) % len(agent.Agents)
+		case "enter":
+			c.agentPickerActive = false
+			a := agent.Agents[c.agentPickerIdx]
+			c.sess.SwitchAgent(a)
+			return c, tea.Println(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(a.Label) + c.s.Dim.Render(" · "+a.Tagline)))
+		case "esc", "ctrl+c", "q":
+			c.agentPickerActive = false
 		}
 		return c, nil
 	}
@@ -528,6 +550,9 @@ func (c *Chat) View() tea.View {
 	if c.pickerActive {
 		return tea.NewView(c.pickerView())
 	}
+	if c.agentPickerActive {
+		return tea.NewView(c.agentPickerView())
+	}
 
 	var b strings.Builder
 
@@ -573,6 +598,28 @@ func (c *Chat) pickerView() string {
 		b.WriteString(strings.Repeat(" ", pad) + cursor + mark + label + "\n")
 	}
 	b.WriteString("\n" + indent(c.s.Dim.Render("↑↓ move   ⏎ select   esc cancel   ·   /connect to add a provider")))
+	return b.String()
+}
+
+// agentPickerView renders the agent chooser: each persona with its tagline,
+// the active one marked, cursor on the highlighted row.
+func (c *Chat) agentPickerView() string {
+	var b strings.Builder
+	b.WriteString(indent(c.s.Text.Render("switch agent")) + "\n\n")
+	for i, a := range agent.Agents {
+		cursor := "  "
+		label := c.s.Dim.Render(padTo(a.Label, 8))
+		if i == c.agentPickerIdx {
+			cursor = c.s.Accent.Render("› ")
+			label = c.s.Text.Render(padTo(a.Label, 8))
+		}
+		mark := "  "
+		if a.ID == c.sess.Agent.ID {
+			mark = c.s.Accent.Render("• ")
+		}
+		b.WriteString(strings.Repeat(" ", pad) + cursor + mark + label + c.s.Dim.Render(a.Tagline) + "\n")
+	}
+	b.WriteString("\n" + indent(c.s.Dim.Render("↑↓ move   ⏎ switch   esc cancel")))
 	return b.String()
 }
 
