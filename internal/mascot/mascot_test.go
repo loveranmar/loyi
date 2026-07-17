@@ -15,14 +15,14 @@ func TestRenderVariantsAndFaces(t *testing.T) {
 		s    State
 		want string // substring that must appear (ANSI-stripped)
 	}{
-		{Mini, Idle, "ฅ(•ᴥ•)ฅ"},
-		{Mini, Listening, "ฅ(o ᴥ o)ฅ"},
-		{Mini, Thinking, "ฅ(- ᴥ -)ฅ"},
-		{Mini, Success, "ฅ(^ᴥ^)ฅ"},
-		{Mini, Error, "ฅ(x ᴥ x)ฅ"},
-		{Full, Idle, "( •ᴥ• )"},
-		{Full, Success, "( ^ᴥ^ )"},
-		{Full, Error, "( xᴥx )"},
+		{Mini, Idle, "(•‿•)"},
+		{Mini, Listening, "(o‿o)"},
+		{Mini, Thinking, "(•_•)"},
+		{Mini, Success, "(^‿^)"},
+		{Mini, Error, "(x_x)"},
+		{Full, Idle, "( •‿• )"},
+		{Full, Success, "( ^‿^ )"},
+		{Full, Error, "( x_x )"},
 	}
 	for _, c := range cases {
 		got := stripANSI(Render(c.v, c.s, th))
@@ -63,7 +63,7 @@ func TestBlinkToggles(t *testing.T) {
 	if !m.swap {
 		t.Fatal("first idle tick should enter the blink (closed) frame")
 	}
-	if !strings.Contains(stripANSI(m.View()), "ฅ(-ᴥ-)ฅ") {
+	if !strings.Contains(stripANSI(m.View()), "(-‿-)") {
 		t.Errorf("blink frame should show closed eyes, got %q", stripANSI(m.View()))
 	}
 	// next tick reopens

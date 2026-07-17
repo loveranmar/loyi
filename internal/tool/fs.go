@@ -96,7 +96,11 @@ func (t *WriteTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 	if len(a.Content) > 0 && !strings.HasSuffix(a.Content, "\n") {
 		n++
 	}
-	return fmt.Sprintf("wrote %s (%d lines)", t.WS.rel(abs), n), nil
+	noun := "lines"
+	if n == 1 {
+		noun = "line"
+	}
+	return fmt.Sprintf("wrote %s · %d %s", t.WS.rel(abs), n, noun), nil
 }
 
 // ---- edit ----

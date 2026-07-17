@@ -3,8 +3,11 @@
 // a loyal pup) and recolors with the active theme.
 //
 // Two variants:
-//   - Mini: one line, for the status/prompt area.   ฅ(•ᴥ•)ฅ
-//   - Full: three lines, for onboarding and version. (\_/) / ( •ᴥ• ) / />   \
+//   - Mini: one line, for the status/prompt area.   (•‿•)
+//   - Full: three lines, for onboarding and version. (\_/) / ( •‿• ) / />   \
+//
+// Glyphs are deliberately font-safe: plain parens, bullets, and kaomoji
+// mouths — no exotic codepoints that fall back to tofu in common fonts.
 //
 // Faces swap the eyes per state; a slow blink keeps it alive while idle, and a
 // faster two-frame flutter reads as "working" while thinking. Animation is
@@ -31,22 +34,23 @@ const (
 type State int
 
 const (
-	Idle      State = iota // waiting, calm       •  •
-	Listening              // your turn            o  o
-	Thinking               // working              -  -  (flutters)
-	Success                // done, in accent      ^  ^
-	Error                  // failed, in terracotta x  x
+	Idle      State = iota // waiting, calm         (•‿•)
+	Listening              // your turn             (o‿o)
+	Thinking               // working               (•_•)  (flutters)
+	Success                // done, in accent       (^‿^)
+	Error                  // failed, in terracotta (x_x)
 )
 
 // face holds the exact frames for a state. primary is the resting frame; alt
 // is the blink (idle/listening) or flutter (thinking) frame — empty for the
-// static success/error states. eye is the glyph used by the multi-line Full
-// variant, which substitutes rather than using literal frames. accent/danger
-// pick a non-default color.
+// static success/error states. eye and mouth are the glyphs used by the
+// multi-line Full variant, which substitutes rather than using literal
+// frames. accent/danger pick a non-default color.
 type face struct {
 	primary string
 	alt     string
 	eye     string
+	mouth   string
 	accent  bool
 	danger  bool
 }
@@ -54,16 +58,17 @@ type face struct {
 // faces is the single place to tweak how each state looks. The mini frames are
 // written out literally so the exact spacing matches the brand spec.
 var faces = map[State]face{
-	Idle:      {primary: "ฅ(•ᴥ•)ฅ", alt: "ฅ(-ᴥ-)ฅ", eye: "•"},
-	Listening: {primary: "ฅ(o ᴥ o)ฅ", alt: "ฅ(- ᴥ -)ฅ", eye: "o"},
-	Thinking:  {primary: "ฅ(- ᴥ -)ฅ", alt: "ฅ(• ᴥ •)ฅ", eye: "•"}, // flutters
-	Success:   {primary: "ฅ(^ᴥ^)ฅ", eye: "^", accent: true},
-	Error:     {primary: "ฅ(x ᴥ x)ฅ", eye: "x", danger: true},
+	Idle:      {primary: "(•‿•)", alt: "(-‿-)", eye: "•", mouth: "‿"},
+	Listening: {primary: "(o‿o)", alt: "(-‿-)", eye: "o", mouth: "‿"},
+	Thinking:  {primary: "(•_•)", alt: "(-_-)", eye: "•", mouth: "_"}, // flutters
+	Success:   {primary: "(^‿^)", eye: "^", mouth: "‿", accent: true},
+	Error:     {primary: "(x_x)", eye: "x", mouth: "_", danger: true},
 }
 
-// fullBody renders the multi-line Full variant with the eye glyph substituted.
-func fullBody(eye string) string {
-	return "(\\_/)\n( " + eye + "ᴥ" + eye + " )\n/>   \\"
+// fullBody renders the multi-line Full variant with the face glyphs
+// substituted.
+func fullBody(eye, mouth string) string {
+	return "(\\_/)\n( " + eye + mouth + eye + " )\n/>   \\"
 }
 
 func styleFor(f face, th theme.Theme) lipgloss.Style {
@@ -83,7 +88,7 @@ func styleFor(f face, th theme.Theme) lipgloss.Style {
 func Render(v Variant, st State, th theme.Theme) string {
 	f := faces[st]
 	if v == Full {
-		return styleFor(f, th).Render(fullBody(f.eye))
+		return styleFor(f, th).Render(fullBody(f.eye, f.mouth))
 	}
 	return styleFor(f, th).Render(f.primary)
 }
@@ -180,7 +185,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 func (m Model) View() string {
 	f := faces[m.state]
 	if m.Variant == Full {
-		return styleFor(f, m.th).Render(fullBody(f.eye))
+		return styleFor(f, m.th).Render(fullBody(f.eye, f.mouth))
 	}
 	frame := f.primary
 	if m.swap && f.alt != "" {

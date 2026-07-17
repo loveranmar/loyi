@@ -67,11 +67,13 @@ type Chat struct {
 	pickerEntries []factory.ModelEntry
 	pickerIdx     int
 
-	events   chan agent.Event
-	working  bool
-	stream   strings.Builder // assistant text for the current segment
-	toolLine string          // live tool activity line
-	pending  *agent.PermissionEvent
+	events     chan agent.Event
+	working    bool
+	stream     strings.Builder // assistant text for the current segment
+	toolLine   string          // live tool activity: the running call's summary
+	toolTarget string          // what the running call is acting on (path, pattern…)
+	toolBlock  bool            // a ✓/✗ line was printed since the last text block
+	pending    *agent.PermissionEvent
 
 	// loop state (/loop)
 	loopActive bool
@@ -123,7 +125,7 @@ func (c *Chat) banner() string {
 		greet = fmt.Sprintf("hey %s. describe what you want to build, or /help for commands.", who)
 	}
 	head := c.s.Accent.Render("loyi") + c.s.Dim.Render(" · "+c.sess.Agent.Label)
-	return indent(head) + "\n\n" + indent(c.s.Dim.Render(greet))
+	return indent(head) + "\n\n" + indent(c.s.Dim.Render(greet)) + "\n"
 }
 
 // indent prefixes a (possibly multi-line) block with the standard left pad.
@@ -135,6 +137,30 @@ func indent(s string) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// userLine formats a user turn: dim › caret, primary text.
+func (c *Chat) userLine(text string) string {
+	return indent(c.s.Dim.Render("›") + " " + c.s.Text.Render(text))
+}
+
+// loyiLine formats a loyi turn: accent ▸ caret on the first line, continuation
+// lines aligned under the text.
+func (c *Chat) loyiLine(text string) string {
+	p := strings.Repeat(" ", pad)
+	lines := strings.Split(text, "\n")
+	for i, ln := range lines {
+		if i == 0 {
+			lines[i] = p + c.s.Accent.Render("▸") + " " + c.s.Text.Render(ln)
+		} else {
+			lines[i] = p + "  " + c.s.Text.Render(ln)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// toolIndent is the left margin for tool action lines, tucked under loyi's
+// message.
+func toolIndent() string { return strings.Repeat(" ", pad+2) }
 
 // setActivity moves the mascot face and status word to a new activity and
 // returns the commands to animate them.
@@ -222,7 +248,7 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		c.width = msg.Width
-		c.input.SetWidth(c.boxContentWidth())
+		c.input.SetWidth(c.boxContentWidth() - 5)
 		return c, nil
 
 	case mascot.TickMsg:
@@ -354,8 +380,7 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (c *Chat) startTurn(text string) (tea.Model, tea.Cmd) {
-	echo := c.s.Accent.Render("›") + " " + c.s.Text.Render(text)
-	return c, c.beginTurn(text, echo)
+	return c, c.beginTurn(text, "\n"+c.userLine(text))
 }
 
 // beginTurn kicks off one agent turn, printing echo above the live view and
@@ -364,6 +389,8 @@ func (c *Chat) beginTurn(text, echo string) tea.Cmd {
 	c.working = true
 	c.stream.Reset()
 	c.toolLine = ""
+	c.toolTarget = ""
+	c.toolBlock = false
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
@@ -441,16 +468,22 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 	case agent.ToolStartEvent:
 		var cmds []tea.Cmd
 		if s := strings.TrimSpace(c.stream.String()); s != "" {
-			cmds = append(cmds, tea.Println(c.s.Text.Render(s)))
+			cmds = append(cmds, tea.Println("\n"+c.loyiLine(s)))
 			c.stream.Reset()
+			c.toolBlock = false
 		}
 		c.toolLine = e.Summary
+		c.toolTarget = targetOf(e.Summary)
 		cmds = append(cmds, c.setActivity(activityForTool(e.Name)), c.waitEvent())
 		return c, tea.Batch(cmds...)
 
 	case agent.ToolResultEvent:
 		c.toolLine = ""
-		line := indent(c.s.Accent.Render("·") + " " + c.s.Dim.Render(toolLineText(e)))
+		line := c.toolResultLine(e)
+		if !c.toolBlock {
+			line = "\n" + line // first action under a message gets its own block
+			c.toolBlock = true
+		}
 		// after a tool, the model is thinking again
 		return c, tea.Batch(tea.Println(line), c.setActivity(mascot.ActThinking), c.waitEvent())
 
@@ -467,7 +500,8 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 		c.stream.Reset()
 		var cmds []tea.Cmd
 		if final != "" {
-			cmds = append(cmds, tea.Println(indent(c.s.Text.Render(final))))
+			cmds = append(cmds, tea.Println("\n"+c.loyiLine(final)))
+			c.toolBlock = false
 		}
 		if cont := c.loopNext(final); cont != nil {
 			cmds = append(cmds, cont)
@@ -483,22 +517,85 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 		c.stopLoop()
 		var cmds []tea.Cmd
 		if s := strings.TrimSpace(c.stream.String()); s != "" {
-			cmds = append(cmds, tea.Println(indent(c.s.Text.Render(s))))
+			cmds = append(cmds, tea.Println("\n"+c.loyiLine(s)))
 			c.stream.Reset()
 		}
-		cmds = append(cmds, tea.Println(indent(c.s.Danger.Render("✗ ")+c.s.Dim.Render(e.Err.Error()))))
+		cmds = append(cmds, tea.Println("\n"+indent(c.s.Danger.Render("✗ ")+c.s.Dim.Render(e.Err.Error()))))
+		c.toolBlock = false
 		cmds = append(cmds, c.setActivity(mascot.ActError), restMascot())
 		return c, tea.Sequence(cmds...)
 	}
 	return c, c.waitEvent()
 }
 
-func toolLineText(e agent.ToolResultEvent) string {
-	label := e.Name
-	if e.IsError {
-		return label + " · " + firstLine(e.Output)
+// toolResultLine resolves a finished tool call into its transcript line:
+// "✓ index.html · 1 line" — mark in accent (✗ in terracotta on error), target
+// primary, detail dim.
+func (c *Chat) toolResultLine(e agent.ToolResultEvent) string {
+	target := c.toolTarget
+	if target == "" {
+		target = e.Name
 	}
-	return label + " · " + firstLine(e.Output)
+	if e.IsError {
+		return toolIndent() + c.s.Danger.Render("✗") + " " +
+			c.s.Text.Render(target) + c.s.Dim.Render(" · "+firstLine(e.Output))
+	}
+	return toolIndent() + c.s.Accent.Render("✓") + " " +
+		c.s.Text.Render(target) + c.s.Dim.Render(" · "+toolDetail(e.Name, e.Output))
+}
+
+// targetOf pulls what a tool acts on from its summary ("write index.html" →
+// "index.html").
+func targetOf(summary string) string {
+	if _, arg, ok := strings.Cut(summary, " "); ok {
+		return arg
+	}
+	return summary
+}
+
+// toolDetail is the short dim note after the target: what came of the call, in
+// a couple of words.
+func toolDetail(name, out string) string {
+	out = strings.TrimSpace(out)
+	switch name {
+	case "write":
+		// the tool reports "wrote index.html · 1 line" — keep just the tail
+		if _, d, ok := strings.Cut(firstLine(out), " · "); ok {
+			return d
+		}
+	case "edit":
+		return "edited"
+	case "read":
+		return countNoun(lineCount(out), "line", "lines")
+	case "grep", "glob":
+		if strings.HasPrefix(out, "no ") {
+			return firstLine(out)
+		}
+		return countNoun(lineCount(out), "match", "matches")
+	case "ls", "tree":
+		return countNoun(lineCount(out), "entry", "entries")
+	case "run":
+		if out == "(no output)" {
+			return "done"
+		}
+		return countNoun(lineCount(out), "line", "lines")
+	}
+	return firstLine(out)
+}
+
+func lineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+// countNoun formats a count with the right noun form: "1 line", "3 lines".
+func countNoun(n int, singular, plural string) string {
+	if n == 1 {
+		return "1 " + singular
+	}
+	return fmt.Sprintf("%d %s", n, plural)
 }
 
 func firstLine(s string) string {
@@ -533,10 +630,14 @@ func (c *Chat) View() tea.View {
 
 	// live assistant text streams above the box until it's committed
 	if s := strings.TrimSpace(c.stream.String()); s != "" {
-		b.WriteString(indent(c.s.Text.Render(s)) + "\n\n")
+		b.WriteString("\n" + c.loyiLine(s) + "\n")
+	}
+	// running tool action, tucked under the message; resolves to a ✓ line
+	if c.toolLine != "" {
+		b.WriteString("\n" + toolIndent() + c.s.Dim.Render(c.word+"  ") + c.s.Text.Render(c.toolLine) + "\n")
 	}
 
-	b.WriteString(c.inputBox() + "\n")
+	b.WriteString("\n\n" + c.inputBox() + "\n")
 	b.WriteString(c.statusLine())
 	if c.pickerLoading {
 		b.WriteString("\n" + indent(c.s.Dim.Render("listing models…")))
@@ -576,11 +677,14 @@ func (c *Chat) pickerView() string {
 	return b.String()
 }
 
-// inputBox renders the caret + input inside a rounded border. The border is
-// dim at rest and the theme accent while loyi is working.
+// inputBox renders the caret + input inside a rounded border, one line tall.
+// The border is dim at rest and the theme accent while loyi is working.
 func (c *Chat) inputBox() string {
 	cw := c.boxContentWidth()
-	c.input.SetWidth(cw - 1) // leave a space of breathing room after the border
+	// the leading spaces (2) + prompt (2) + input field must fit inside cw,
+	// with a cell of slack for the cursor — anything wider wraps and the box
+	// grows a phantom empty row
+	c.input.SetWidth(cw - 5)
 
 	border := lipgloss.Color(theme.Neutrals.Border)
 	if c.working && c.pending == nil {
@@ -591,7 +695,7 @@ func (c *Chat) inputBox() string {
 		BorderForeground(border).
 		Width(cw).
 		MarginLeft(pad).
-		Render(" " + c.input.View())
+		Render("  " + c.input.View())
 }
 
 // statusLine is the line under the box: mini mascot + state word on the left,
