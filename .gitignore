@@ -9,3 +9,8 @@
 
 # local-only claude notes
 CLAUDE.local.md
+
+# stray local test artifacts
+*.pid
+/chathome/
+/project/

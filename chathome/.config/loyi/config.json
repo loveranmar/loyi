@@ -1,2 +1,0 @@
-{"name":"love","theme":"mauve","onboarded":true,"default_provider":"anthropic",
- "providers":{"anthropic":{"auth":"api_key","api_key":"k","base_url":"http://127.0.0.1:8901"}}}
