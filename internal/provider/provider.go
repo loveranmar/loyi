@@ -31,6 +31,7 @@ type Message struct {
 
 // Request is a single completion request, expressed in loyi's own terms.
 type Request struct {
+	System   string // optional system prompt
 	Messages []Message
 	Effort   Effort
 	Model    string // backend-specific model id; empty means the provider's default
