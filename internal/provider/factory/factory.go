@@ -11,14 +11,12 @@ import (
 	"github.com/loveranmar/loyi/internal/provider"
 	"github.com/loveranmar/loyi/internal/provider/anthropic"
 	"github.com/loveranmar/loyi/internal/provider/codex"
+	"github.com/loveranmar/loyi/internal/provider/openai"
 	"github.com/loveranmar/loyi/internal/provider/openaicompat"
 )
 
 const (
-	openaiBaseURL     = "https://api.openai.com/v1"
-	openrouterBaseURL = "https://openrouter.ai/api/v1"
-
-	openaiDefaultModel     = "gpt-5.2"
+	openrouterBaseURL      = "https://openrouter.ai/api/v1"
 	openrouterDefaultModel = "openrouter/auto"
 )
 
@@ -52,7 +50,9 @@ func Build(ctx context.Context, cfg *config.Config, id string) (provider.Provide
 			Model:     pc.Model,
 		}, nil
 	case "openai":
-		return compat(id, pc, openaiBaseURL, openaiDefaultModel), nil
+		// OpenAI uses the Responses API (native web search); OpenRouter and
+		// custom endpoints stay on chat completions.
+		return &openai.Client{APIKey: pc.APIKey, BaseURL: pc.BaseURL, Model: pc.Model}, nil
 	case "openrouter":
 		return compat(id, pc, openrouterBaseURL, openrouterDefaultModel), nil
 	default:

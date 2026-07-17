@@ -1,14 +1,12 @@
-// Package codex is the personal-use provider that routes through a ChatGPT
-// subscription's Codex backend, using the same wire protocol as OpenAI's
-// Codex CLI. This sits in TOS gray territory — it is opt-in, clearly
-// labeled, and never the default.
-package codex
+// Package openai talks to OpenAI's Responses API. It's used for OpenAI API
+// keys (not OpenRouter or custom endpoints, which stay on the chat-completions
+// path) because native web search lives in the Responses API, not chat
+// completions. The wire shape mirrors the codex backend.
+package openai
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,20 +17,17 @@ import (
 )
 
 const (
-	DefaultBaseURL = "https://chatgpt.com/backend-api"
-	DefaultModel   = "gpt-5.2-codex"
-
-	instructions = "You are Codex, a coding agent running in a CLI. Be precise, direct, and helpful."
+	DefaultBaseURL = "https://api.openai.com/v1"
+	DefaultModel   = "gpt-5.2"
 )
 
 type Client struct {
-	Access    string
-	AccountID string
-	BaseURL   string
-	Model     string
+	APIKey  string
+	BaseURL string
+	Model   string
 }
 
-func (c *Client) Name() string { return "chatgpt" }
+func (c *Client) Name() string { return "openai" }
 
 func (c *Client) base() string {
 	if c.BaseURL != "" {
@@ -51,26 +46,51 @@ func (c *Client) model(req provider.Request) string {
 	return DefaultModel
 }
 
+// Models lists chat-capable model ids (GET /models).
+func (c *Client) Models(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base()+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		text, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+		return nil, fmt.Errorf("openai models returned %d: %s", res.StatusCode, strings.TrimSpace(string(text)))
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
+}
+
 func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provider.Chunk, error) {
-	instr := instructions
-	if req.System != "" {
-		instr += "\n\n" + req.System
-	}
-
-	input := buildInput(req.Messages)
-
-	effort := "medium"
-	if req.Effort != "" {
-		effort = string(req.Effort)
-	}
+	model := c.model(req)
 	body := map[string]any{
-		"model":        c.model(req),
-		"instructions": instr,
-		"input":        input,
-		"stream":       true,
-		"store":        false,
-		"reasoning":    map[string]string{"effort": effort, "summary": "auto"},
-		"include":      []string{"reasoning.encrypted_content"},
+		"model":  model,
+		"input":  buildInput(req.Messages),
+		"stream": true,
+		"store":  false,
+	}
+	if req.System != "" {
+		body["instructions"] = req.System
+	}
+	// reasoning.effort is only valid for reasoning models (gpt-5, o-series).
+	if req.Effort != "" && isReasoningModel(model) {
+		body["reasoning"] = map[string]string{"effort": string(req.Effort)}
 	}
 	if len(req.Tools) > 0 {
 		// loyi's client-side web_search/web_fetch collapse into the Responses
@@ -97,19 +117,13 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	if err != nil {
 		return nil, err
 	}
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base()+"/codex/responses", bytes.NewReader(payload))
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base()+"/responses", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
-	session := make([]byte, 16)
-	_, _ = rand.Read(session)
 	hreq.Header.Set("Content-Type", "application/json")
 	hreq.Header.Set("Accept", "text/event-stream")
-	hreq.Header.Set("Authorization", "Bearer "+c.Access)
-	hreq.Header.Set("chatgpt-account-id", c.AccountID)
-	hreq.Header.Set("OpenAI-Beta", "responses=experimental")
-	hreq.Header.Set("originator", "codex_cli_rs")
-	hreq.Header.Set("session_id", hex.EncodeToString(session))
+	hreq.Header.Set("Authorization", "Bearer "+c.APIKey)
 
 	res, err := http.DefaultClient.Do(hreq)
 	if err != nil {
@@ -118,16 +132,15 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	if res.StatusCode != http.StatusOK {
 		defer res.Body.Close()
 		text, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return nil, fmt.Errorf("chatgpt backend returned %d: %s", res.StatusCode, strings.TrimSpace(string(text)))
+		return nil, fmt.Errorf("openai returned %d: %s", res.StatusCode, strings.TrimSpace(string(text)))
 	}
 
 	out := make(chan provider.Chunk)
 	go func() {
 		defer close(out)
 		defer res.Body.Close()
-		st := &codexStream{out: out}
-		err := provider.SSEData(res.Body, st.event)
-		if err != nil {
+		st := &respStream{out: out}
+		if err := provider.SSEData(res.Body, st.event); err != nil {
 			out <- provider.Chunk{Err: err}
 			return
 		}
@@ -136,8 +149,13 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	return out, nil
 }
 
-// buildInput converts loyi messages into Responses-API input items,
-// including function_call and function_call_output for tool round-trips.
+func isReasoningModel(m string) bool {
+	m = strings.ToLower(m)
+	return strings.HasPrefix(m, "gpt-5") || strings.HasPrefix(m, "o1") ||
+		strings.HasPrefix(m, "o3") || strings.HasPrefix(m, "o4")
+}
+
+// buildInput converts loyi messages into Responses-API input items.
 func buildInput(msgs []provider.Message) []map[string]any {
 	input := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
@@ -174,15 +192,15 @@ func textItem(role, contentType, text string) map[string]any {
 	}
 }
 
-// codexStream accumulates streamed text, function calls, and usage.
-type codexStream struct {
+// respStream accumulates streamed text, function calls, web-search calls, and usage.
+type respStream struct {
 	out   chan<- provider.Chunk
 	calls []provider.ToolCall
-	byID  map[string]int // response item id -> index into calls
+	byID  map[string]int
 	usage *provider.Usage
 }
 
-func (s *codexStream) event(data string) bool {
+func (s *respStream) event(data string) bool {
 	var ev struct {
 		Type  string `json:"type"`
 		Delta string `json:"delta"`
@@ -252,7 +270,7 @@ func (s *codexStream) event(data string) bool {
 		if ev.Response.Error != nil {
 			msg = ev.Response.Error.Message
 		}
-		s.out <- provider.Chunk{Err: fmt.Errorf("chatgpt: %s", msg)}
+		s.out <- provider.Chunk{Err: fmt.Errorf("openai: %s", msg)}
 		return false
 	}
 	return true
