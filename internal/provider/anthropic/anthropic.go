@@ -33,6 +33,43 @@ type Client struct {
 
 func (c *Client) Name() string { return "anthropic" }
 
+// Models lists the model ids available to this account (GET /v1/models).
+func (c *Client) Models(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base()+"/v1/models?limit=100", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("anthropic-version", "2023-06-01")
+	if c.APIKey == "" {
+		req.Header.Set("Authorization", "Bearer "+c.Access)
+		req.Header.Set("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
+	} else {
+		req.Header.Set("x-api-key", c.APIKey)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		text, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+		return nil, fmt.Errorf("anthropic models returned %d: %s", res.StatusCode, strings.TrimSpace(string(text)))
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
+}
+
 func (c *Client) base() string {
 	if c.BaseURL != "" {
 		return strings.TrimRight(c.BaseURL, "/")

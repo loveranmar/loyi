@@ -24,6 +24,38 @@ type Client struct {
 
 func (c *Client) Name() string { return c.ID }
 
+// Models lists the model ids the endpoint exposes (GET /models).
+func (c *Client) Models(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimRight(c.BaseURL, "/")+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		text, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+		return nil, fmt.Errorf("%s models returned %d: %s", c.ID, res.StatusCode, strings.TrimSpace(string(text)))
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
+}
+
 func (c *Client) model(req provider.Request) string {
 	if req.Model != "" {
 		return req.Model

@@ -29,15 +29,17 @@ func (c *Chat) runCommand(line string) (tea.Model, tea.Cmd) {
 		return c.agentCommand(args)
 	case "effort":
 		return c.effortCommand(args)
-	case "model":
+	case "model", "models":
 		return c.modelCommand(args)
+	case "connect", "login", "provider":
+		return c, c.connect()
 	case "loop":
 		return c.loopCommand(args)
 	case "quit", "exit":
 		c.quit = true
 		return c, tea.Quit
 	default:
-		return c, tea.Println(c.s.Dim.Render("  unknown command: /" + cmd + "  ·  try /help"))
+		return c, tea.Println(indent(c.s.Dim.Render("unknown command: /" + cmd + "  ·  try /help")))
 	}
 }
 
@@ -46,7 +48,8 @@ func (c *Chat) helpText() string {
 		{"/help", "show this list"},
 		{"/agent [id]", "switch persona: plan · build · ship (no id lists them)"},
 		{"/effort [low|medium|high]", "reasoning effort (no arg shows current)"},
-		{"/model [id]", "override the model for this session"},
+		{"/model [id]", "pick a model (no id opens the picker across all providers)"},
+		{"/connect", "connect another provider (claude, chatgpt, api key, custom)"},
 		{"/usage", "tokens and tool calls this session (estimated)"},
 		{"/clear", "clear the conversation and start fresh"},
 		{"/loop <n> <task>", "run a task, repeating up to n× until the agent says DONE"},
@@ -155,15 +158,16 @@ func (c *Chat) effortCommand(args []string) (tea.Model, tea.Cmd) {
 }
 
 func (c *Chat) modelCommand(args []string) (tea.Model, tea.Cmd) {
-	if len(args) == 0 {
-		cur := c.sess.Model
-		if cur == "" {
-			cur = "provider default"
-		}
-		return c, tea.Println(c.s.Dim.Render("  model: ") + c.s.Text.Render(cur))
+	if c.working {
+		return c, tea.Println(indent(c.s.Dim.Render("wait for the current turn to finish")))
 	}
+	if len(args) == 0 {
+		// no id: open the interactive picker across all connected providers
+		return c, c.openPicker()
+	}
+	// explicit id: set it directly on the current provider
 	c.sess.Model = args[0]
-	return c, tea.Println(c.s.Accent.Render("  → ") + c.s.Text.Render("model "+args[0]))
+	return c, tea.Println(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(args[0]) + c.s.Dim.Render(" · "+c.providerID)))
 }
 
 func padTo(s string, n int) string {

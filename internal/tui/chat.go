@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/loveranmar/loyi/internal/agent"
 	"github.com/loveranmar/loyi/internal/config"
 	"github.com/loveranmar/loyi/internal/mascot"
+	"github.com/loveranmar/loyi/internal/provider/factory"
 	"github.com/loveranmar/loyi/internal/theme"
 )
 
@@ -25,6 +28,15 @@ type mascotRestMsg struct{}
 
 // wordTickMsg rotates the status word. gen guards against stale ticks.
 type wordTickMsg struct{ gen int }
+
+// catalogMsg carries the fetched model list into the picker.
+type catalogMsg struct {
+	entries []factory.ModelEntry
+	err     string
+}
+
+// reloadedMsg fires after `/connect` returns from setup, with a fresh config.
+type reloadedMsg struct{ cfg *config.Config }
 
 // pad is the left margin — nothing is ever glued to the terminal edge.
 const pad = 2
@@ -44,6 +56,16 @@ type Chat struct {
 	cycler  *mascot.Cycler
 	word    string
 	wordGen int
+
+	// active provider (for the /model picker and switching)
+	providerID string
+
+	// model picker state
+	pickerLoading bool
+	pickerActive  bool
+	pickerErr     string
+	pickerEntries []factory.ModelEntry
+	pickerIdx     int
 
 	events   chan agent.Event
 	working  bool
@@ -67,15 +89,16 @@ func NewChat(cfg *config.Config, sess *agent.Session, th theme.Theme) *Chat {
 	in.Placeholder = "what are we building?"
 	in.SetVirtualCursor(true)
 	c := &Chat{
-		cfg:    cfg,
-		sess:   sess,
-		th:     th,
-		s:      th.Styles(),
-		input:  in,
-		pup:    mascot.New(mascot.Mini, th),
-		cycler: mascot.NewCycler(rand.New(rand.NewSource(time.Now().UnixNano()))),
-		word:   "ready",
-		events: make(chan agent.Event, 64),
+		cfg:        cfg,
+		sess:       sess,
+		th:         th,
+		s:          th.Styles(),
+		input:      in,
+		pup:        mascot.New(mascot.Mini, th),
+		cycler:     mascot.NewCycler(rand.New(rand.NewSource(time.Now().UnixNano()))),
+		word:       "ready",
+		providerID: cfg.DefaultProvider,
+		events:     make(chan agent.Event, 64),
 	}
 	st := textinput.DefaultDarkStyles()
 	st.Focused.Prompt = c.s.Accent
@@ -130,6 +153,71 @@ func (c *Chat) wordTick() tea.Cmd {
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return wordTickMsg{gen: gen} })
 }
 
+// openPicker fetches the model catalog across all providers and opens the
+// picker when it arrives.
+func (c *Chat) openPicker() tea.Cmd {
+	c.pickerLoading = true
+	cfg := c.cfg
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		return catalogMsg{entries: factory.Catalog(ctx, cfg)}
+	}
+}
+
+func (c *Chat) currentModelIndex() int {
+	for i, e := range c.pickerEntries {
+		if e.Provider == c.providerID && e.Model == c.currentModel() {
+			return i
+		}
+	}
+	return 0
+}
+
+func (c *Chat) currentModel() string {
+	if c.sess.Model != "" {
+		return c.sess.Model
+	}
+	if pc := c.cfg.Providers[c.providerID]; pc != nil && pc.Model != "" {
+		return pc.Model
+	}
+	return ""
+}
+
+// pickModel switches the session to the chosen model, rebuilding the provider
+// if it belongs to a different backend than the current one.
+func (c *Chat) pickModel(e factory.ModelEntry) (tea.Model, tea.Cmd) {
+	c.pickerActive = false
+	if e.Provider != c.providerID {
+		p, err := factory.Build(context.Background(), c.cfg, e.Provider)
+		if err != nil {
+			return c, tea.Println(indent(c.s.Danger.Render("✗ ") + c.s.Dim.Render(err.Error())))
+		}
+		c.sess.Provider = p
+		c.providerID = e.Provider
+	}
+	c.sess.Model = e.Model
+	line := c.s.Accent.Render("→ ") + c.s.Text.Render(e.Model) + c.s.Dim.Render(" · "+e.Provider)
+	return c, tea.Println(indent(line))
+}
+
+// connect pauses the chat, runs `loyi setup`, then reloads the config so newly
+// connected providers show up in the picker.
+func (c *Chat) connect() tea.Cmd {
+	exe, err := os.Executable()
+	if err != nil {
+		return tea.Println(indent(c.s.Dim.Render("run `loyi setup` to connect a provider")))
+	}
+	cmd := exec.Command(exe, "setup")
+	return tea.ExecProcess(cmd, func(error) tea.Msg {
+		cfg, err := config.Load()
+		if err != nil {
+			return reloadedMsg{cfg: c.cfg}
+		}
+		return reloadedMsg{cfg: cfg}
+	})
+}
+
 func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -155,6 +243,23 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return c, nil
 
+	case catalogMsg:
+		c.pickerLoading = false
+		if msg.err != "" {
+			return c, tea.Println(indent(c.s.Dim.Render("couldn't list models: " + msg.err)))
+		}
+		if len(msg.entries) == 0 {
+			return c, tea.Println(indent(c.s.Dim.Render("no models found — run /connect to add a provider")))
+		}
+		c.pickerEntries = msg.entries
+		c.pickerActive = true
+		c.pickerIdx = c.currentModelIndex()
+		return c, nil
+
+	case reloadedMsg:
+		c.cfg = msg.cfg
+		return c, tea.Println(indent(c.s.Dim.Render("providers refreshed — /model to pick from them")))
+
 	case eventMsg:
 		return c.handleEvent(msg.ev)
 
@@ -166,6 +271,21 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+
+	// Model picker takes over the keyboard.
+	if c.pickerActive {
+		switch key {
+		case "up", "k":
+			c.pickerIdx = (c.pickerIdx + len(c.pickerEntries) - 1) % len(c.pickerEntries)
+		case "down", "j":
+			c.pickerIdx = (c.pickerIdx + 1) % len(c.pickerEntries)
+		case "enter":
+			return c.pickModel(c.pickerEntries[c.pickerIdx])
+		case "esc", "ctrl+c", "q":
+			c.pickerActive = false
+		}
+		return c, nil
+	}
 
 	// Permission prompt takes over the keyboard.
 	if c.pending != nil {
@@ -405,6 +525,10 @@ func (c *Chat) View() tea.View {
 	if c.quit {
 		return tea.NewView("")
 	}
+	if c.pickerActive {
+		return tea.NewView(c.pickerView())
+	}
+
 	var b strings.Builder
 
 	// live assistant text streams above the box until it's committed
@@ -414,8 +538,42 @@ func (c *Chat) View() tea.View {
 
 	b.WriteString(c.inputBox() + "\n")
 	b.WriteString(c.statusLine())
+	if c.pickerLoading {
+		b.WriteString("\n" + indent(c.s.Dim.Render("listing models…")))
+	}
 
 	return tea.NewView(b.String())
+}
+
+// pickerView renders the model chooser: models grouped by provider, the
+// current one marked, cursor on the highlighted row.
+func (c *Chat) pickerView() string {
+	var b strings.Builder
+	b.WriteString(indent(c.s.Text.Render("pick a model")) + "\n\n")
+
+	lastProvider := ""
+	for i, e := range c.pickerEntries {
+		if e.Provider != lastProvider {
+			if lastProvider != "" {
+				b.WriteString("\n")
+			}
+			b.WriteString(indent(c.s.Dim.Render(e.Provider)) + "\n")
+			lastProvider = e.Provider
+		}
+		cursor := "  "
+		label := c.s.Dim.Render(e.Model)
+		if i == c.pickerIdx {
+			cursor = c.s.Accent.Render("› ")
+			label = c.s.Text.Render(e.Model)
+		}
+		mark := "  "
+		if e.Provider == c.providerID && e.Model == c.currentModel() {
+			mark = c.s.Accent.Render("• ")
+		}
+		b.WriteString(strings.Repeat(" ", pad) + cursor + mark + label + "\n")
+	}
+	b.WriteString("\n" + indent(c.s.Dim.Render("↑↓ move   ⏎ select   esc cancel   ·   /connect to add a provider")))
+	return b.String()
 }
 
 // inputBox renders the caret + input inside a rounded border. The border is
