@@ -89,6 +89,19 @@ means:
 - No "Generated with Claude Code" (or similar) in commit messages, PR titles,
   PR descriptions, code comments, or docs.
 - No hints in code or comments that any part of the work was AI-authored.
+- Git author identity must never be Claude. Before the first commit of any
+  session, run:
+
+  ```
+  git config user.name "loveranmar"
+  git config user.email "love.ranmar@outlook.com"
+  git config commit.gpgsign false
+  ```
+
+  Cloud sessions preconfigure a `claude` git identity — always override it
+  first, or commits will show as "claude authored" on GitHub. They also sign
+  commits with Claude's SSH key; leave signing off or GitHub shows "Invalid
+  Signature" once the author is overridden.
 
 All work in this repo is presented as the project's work, full stop.
 
