@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -22,6 +23,12 @@ type eventMsg struct{ ev agent.Event }
 // mascotRestMsg returns the mascot to idle after a success/error flash.
 type mascotRestMsg struct{}
 
+// wordTickMsg rotates the status word. gen guards against stale ticks.
+type wordTickMsg struct{ gen int }
+
+// pad is the left margin — nothing is ever glued to the terminal edge.
+const pad = 2
+
 // Chat is loyi's interactive coding interface: a scrolling conversation with
 // the agent, inline (not altscreen) so history stays in the terminal.
 type Chat struct {
@@ -32,6 +39,11 @@ type Chat struct {
 	input textinput.Model
 	pup   mascot.Model
 	width int
+
+	// status word rotation
+	cycler  *mascot.Cycler
+	word    string
+	wordGen int
 
 	events   chan agent.Event
 	working  bool
@@ -61,12 +73,14 @@ func NewChat(cfg *config.Config, sess *agent.Session, th theme.Theme) *Chat {
 		s:      th.Styles(),
 		input:  in,
 		pup:    mascot.New(mascot.Mini, th),
+		cycler: mascot.NewCycler(rand.New(rand.NewSource(time.Now().UnixNano()))),
+		word:   "ready",
 		events: make(chan agent.Event, 64),
 	}
 	st := textinput.DefaultDarkStyles()
 	st.Focused.Prompt = c.s.Accent
-	st.Focused.Text = c.s.Text
-	st.Focused.Placeholder = c.s.Dim
+	st.Focused.Text = c.s.Text       // typed text is full-bright primary
+	st.Focused.Placeholder = c.s.Dim // placeholder is dim
 	st.Cursor.Color = lipgloss.Color(th.Accent)
 	in.SetStyles(st)
 	c.input.Prompt = "› "
@@ -77,22 +91,50 @@ func (c *Chat) Init() tea.Cmd {
 	return tea.Batch(c.input.Focus(), tea.Println(c.banner()), c.pup.Init())
 }
 
+// banner is the header + greeting, printed once so it stays at the top of
+// scrollback. Lowercase, minimal, no provider name.
 func (c *Chat) banner() string {
 	who := c.cfg.Name
-	if who == "" {
-		who = "there"
+	greet := "hey. describe what you want to build, or /help for commands."
+	if who != "" {
+		greet = fmt.Sprintf("hey %s. describe what you want to build, or /help for commands.", who)
 	}
-	pup := mascot.Render(mascot.Full, mascot.Idle, c.th)
-	head := c.s.Accent.Render("loyi") + c.s.Dim.Render(" · "+c.sess.Agent.Label+" · "+c.cfg.DefaultProvider)
-	sub := c.s.Dim.Render(fmt.Sprintf("hey %s. describe what you want to build, or /help for commands.", who))
-	return "\n" + pup + "\n\n" + head + "\n" + sub
+	head := c.s.Accent.Render("loyi") + c.s.Dim.Render(" · "+c.sess.Agent.Label)
+	return indent(head) + "\n\n" + indent(c.s.Dim.Render(greet))
+}
+
+// indent prefixes a (possibly multi-line) block with the standard left pad.
+func indent(s string) string {
+	p := strings.Repeat(" ", pad)
+	lines := strings.Split(s, "\n")
+	for i, ln := range lines {
+		lines[i] = p + ln
+	}
+	return strings.Join(lines, "\n")
+}
+
+// setActivity moves the mascot face and status word to a new activity and
+// returns the commands to animate them.
+func (c *Chat) setActivity(a mascot.Activity) tea.Cmd {
+	c.word = c.cycler.Set(a)
+	cmds := []tea.Cmd{c.pup.SetState(a.Face())}
+	if a.Working() {
+		c.wordGen++
+		cmds = append(cmds, c.wordTick())
+	}
+	return tea.Batch(cmds...)
+}
+
+func (c *Chat) wordTick() tea.Cmd {
+	gen := c.wordGen
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return wordTickMsg{gen: gen} })
 }
 
 func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		c.width = msg.Width
-		c.input.SetWidth(msg.Width - 4)
+		c.input.SetWidth(c.boxContentWidth())
 		return c, nil
 
 	case mascot.TickMsg:
@@ -100,9 +142,16 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.pup, cmd = c.pup.Update(msg)
 		return c, cmd
 
+	case wordTickMsg:
+		if msg.gen == c.wordGen && c.working {
+			c.word = c.cycler.Next()
+			return c, c.wordTick()
+		}
+		return c, nil
+
 	case mascotRestMsg:
 		if !c.working && (c.pup.State() == mascot.Success || c.pup.State() == mascot.Error) {
-			return c, c.pup.SetState(mascot.Idle)
+			return c, c.setActivity(mascot.ActReady)
 		}
 		return c, nil
 
@@ -121,7 +170,7 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Permission prompt takes over the keyboard.
 	if c.pending != nil {
 		resume := func(extra ...tea.Cmd) tea.Cmd {
-			cmds := append(extra, c.pup.SetState(mascot.Thinking), c.waitEvent())
+			cmds := append(extra, c.setActivity(mascot.ActThinking), c.waitEvent())
 			return tea.Sequence(cmds...)
 		}
 		switch key {
@@ -133,7 +182,7 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			c.sess.AutoApprove = true
 			c.pending.Reply <- true
 			c.pending = nil
-			return c, resume(tea.Println(c.s.Dim.Render("  auto-approving tool calls for this session")))
+			return c, resume(tea.Println(indent(c.s.Dim.Render("auto-approving tool calls for this session"))))
 		case "n", "esc":
 			c.pending.Reply <- false
 			c.pending = nil
@@ -142,10 +191,11 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			c.pending.Reply <- false
 			c.pending = nil
 			c.stopLoop()
+			c.working = false
 			if c.cancel != nil {
 				c.cancel()
 			}
-			return c, c.pup.SetState(mascot.Idle)
+			return c, c.setActivity(mascot.ActReady)
 		}
 		return c, nil
 	}
@@ -154,8 +204,9 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		if c.working && c.cancel != nil {
 			c.stopLoop()
+			c.working = false
 			c.cancel()
-			return c, tea.Sequence(tea.Println(c.s.Dim.Render("  interrupted")), c.pup.SetState(mascot.Idle))
+			return c, tea.Sequence(tea.Println(indent(c.s.Dim.Render("interrupted"))), c.setActivity(mascot.ActReady))
 		}
 		c.quit = true
 		return c, tea.Quit
@@ -202,11 +253,24 @@ func (c *Chat) beginTurn(text, echo string) tea.Cmd {
 		sess.Run(ctx, text, func(e agent.Event) { events <- e })
 	}()
 
-	cmds := []tea.Cmd{c.waitEvent(), c.pup.SetState(mascot.Thinking)}
+	cmds := []tea.Cmd{c.waitEvent(), c.setActivity(mascot.ActThinking)}
 	if echo != "" {
 		cmds = append([]tea.Cmd{tea.Println(echo)}, cmds...)
 	}
 	return tea.Batch(cmds...)
+}
+
+// activityForTool maps a tool name to the status activity: wolf verbs for
+// reading/exploring, plain verbs for concrete steps.
+func activityForTool(name string) mascot.Activity {
+	switch name {
+	case "write", "edit":
+		return mascot.ActWriting
+	case "run":
+		return mascot.ActRunning
+	default: // read, tree, ls, glob, grep
+		return mascot.ActReading
+	}
 }
 
 // loopNext decides whether to run another loop iteration after a turn ended
@@ -261,17 +325,19 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 			c.stream.Reset()
 		}
 		c.toolLine = e.Summary
-		cmds = append(cmds, c.waitEvent())
-		return c, tea.Sequence(cmds...)
+		cmds = append(cmds, c.setActivity(activityForTool(e.Name)), c.waitEvent())
+		return c, tea.Batch(cmds...)
 
 	case agent.ToolResultEvent:
 		c.toolLine = ""
-		line := c.s.Accent.Render("  ·") + " " + c.s.Dim.Render(toolLineText(e))
-		return c, tea.Sequence(tea.Println(line), c.waitEvent())
+		line := indent(c.s.Accent.Render("·") + " " + c.s.Dim.Render(toolLineText(e)))
+		// after a tool, the model is thinking again
+		return c, tea.Batch(tea.Println(line), c.setActivity(mascot.ActThinking), c.waitEvent())
 
 	case agent.PermissionEvent:
 		c.pending = &e
 		c.toolLine = ""
+		c.word = "waiting on you"
 		return c, c.pup.SetState(mascot.Listening) // your turn
 
 	case agent.DoneEvent:
@@ -281,13 +347,13 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 		c.stream.Reset()
 		var cmds []tea.Cmd
 		if final != "" {
-			cmds = append(cmds, tea.Println(c.s.Text.Render(final)))
+			cmds = append(cmds, tea.Println(indent(c.s.Text.Render(final))))
 		}
 		if cont := c.loopNext(final); cont != nil {
 			cmds = append(cmds, cont)
 		} else {
-			// no more loop work — flash success, then settle back to idle
-			cmds = append(cmds, c.pup.SetState(mascot.Success), restMascot())
+			// no more loop work — flash success, then settle back to ready
+			cmds = append(cmds, c.setActivity(mascot.ActSuccess), restMascot())
 		}
 		return c, tea.Sequence(cmds...)
 
@@ -297,11 +363,11 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 		c.stopLoop()
 		var cmds []tea.Cmd
 		if s := strings.TrimSpace(c.stream.String()); s != "" {
-			cmds = append(cmds, tea.Println(c.s.Text.Render(s)))
+			cmds = append(cmds, tea.Println(indent(c.s.Text.Render(s))))
 			c.stream.Reset()
 		}
-		cmds = append(cmds, tea.Println(c.s.Danger.Render("  ✗ ")+c.s.Dim.Render(e.Err.Error())))
-		cmds = append(cmds, c.pup.SetState(mascot.Error), restMascot())
+		cmds = append(cmds, tea.Println(indent(c.s.Danger.Render("✗ ")+c.s.Dim.Render(e.Err.Error()))))
+		cmds = append(cmds, c.setActivity(mascot.ActError), restMascot())
 		return c, tea.Sequence(cmds...)
 	}
 	return c, c.waitEvent()
@@ -326,34 +392,79 @@ func firstLine(s string) string {
 	return s
 }
 
+// boxContentWidth is the inner width of the input box (inside the border).
+func (c *Chat) boxContentWidth() int {
+	w := c.width - 2*pad - 2 // left pad, right margin, two border cells
+	if w < 24 {
+		w = 24
+	}
+	return w
+}
+
 func (c *Chat) View() tea.View {
 	if c.quit {
 		return tea.NewView("")
 	}
 	var b strings.Builder
 
-	// live assistant text (before it's committed to scrollback)
+	// live assistant text streams above the box until it's committed
 	if s := strings.TrimSpace(c.stream.String()); s != "" {
-		b.WriteString(c.s.Text.Render(s) + "\n")
+		b.WriteString(indent(c.s.Text.Render(s)) + "\n\n")
 	}
 
-	switch {
-	case c.pending != nil:
-		b.WriteString("\n" + c.pup.View() + "  " + c.permissionPrompt())
-	case c.toolLine != "":
-		b.WriteString(c.pup.View() + " " + c.s.Dim.Render(c.toolLine))
-	case c.working:
-		b.WriteString(c.pup.View() + " " + c.s.Dim.Render("thinking"))
-	default:
-		b.WriteString(c.pup.View() + " " + c.input.View())
-	}
+	b.WriteString(c.inputBox() + "\n")
+	b.WriteString(c.statusLine())
 
-	v := tea.NewView(b.String())
-	return v
+	return tea.NewView(b.String())
 }
 
-func (c *Chat) permissionPrompt() string {
-	q := c.s.Text.Render("allow ") + c.s.Accent.Render(c.pending.Summary) + c.s.Text.Render(" ?")
-	opts := c.s.Dim.Render("   [y] yes   [n] no   [a] always")
-	return q + opts
+// inputBox renders the caret + input inside a rounded border. The border is
+// dim at rest and the theme accent while loyi is working.
+func (c *Chat) inputBox() string {
+	cw := c.boxContentWidth()
+	c.input.SetWidth(cw - 1) // leave a space of breathing room after the border
+
+	border := lipgloss.Color(theme.Neutrals.Border)
+	if c.working && c.pending == nil {
+		border = lipgloss.Color(c.th.Accent)
+	}
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(border).
+		Width(cw).
+		MarginLeft(pad).
+		Render(" " + c.input.View())
+}
+
+// statusLine is the line under the box: mini mascot + state word on the left,
+// keybind hints (or the permission choices) right-aligned to the box width.
+func (c *Chat) statusLine() string {
+	cw := c.boxContentWidth()
+	lead := strings.Repeat(" ", pad+1) // align under the box's inner content
+
+	var left, right string
+	if c.pending != nil {
+		left = c.pup.View() + "  " + c.s.Text.Render("allow ") + c.s.Accent.Render(c.pending.Summary) + c.s.Text.Render("?")
+		right = c.s.Dim.Render("[y] yes   [n] no   [a] always")
+	} else {
+		wordStyle := c.s.Dim
+		switch c.pup.State() {
+		case mascot.Success:
+			wordStyle = c.s.Accent
+		case mascot.Error:
+			wordStyle = c.s.Danger
+		}
+		left = c.pup.View() + "  " + wordStyle.Render(c.word)
+		if c.working {
+			right = c.s.Dim.Render("⌃c stop")
+		} else {
+			right = c.s.Dim.Render("⏎ send   ⌃c quit")
+		}
+	}
+
+	gap := cw - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return lead + left + strings.Repeat(" ", gap) + right
 }

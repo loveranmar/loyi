@@ -69,6 +69,7 @@ type Styles struct {
 	Dim    lipgloss.Style
 	Accent lipgloss.Style
 	Danger lipgloss.Style
+	Border lipgloss.Style // muted border color, for rules and boxes
 }
 
 // Styles builds the style set for this theme.
@@ -78,5 +79,6 @@ func (t Theme) Styles() Styles {
 		Dim:    lipgloss.NewStyle().Foreground(lipgloss.Color(Neutrals.Dim)),
 		Accent: lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)),
 		Danger: lipgloss.NewStyle().Foreground(lipgloss.Color(Danger)),
+		Border: lipgloss.NewStyle().Foreground(lipgloss.Color(Neutrals.Border)),
 	}
 }

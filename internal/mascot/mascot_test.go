@@ -16,10 +16,10 @@ func TestRenderVariantsAndFaces(t *testing.T) {
 		want string // substring that must appear (ANSI-stripped)
 	}{
 		{Mini, Idle, "ฅ(•ᴥ•)ฅ"},
-		{Mini, Listening, "ฅ(oᴥo)ฅ"},
-		{Mini, Thinking, "ฅ(•ᴥ•)ฅ"},
+		{Mini, Listening, "ฅ(o ᴥ o)ฅ"},
+		{Mini, Thinking, "ฅ(- ᴥ -)ฅ"},
 		{Mini, Success, "ฅ(^ᴥ^)ฅ"},
-		{Mini, Error, "ฅ(xᴥx)ฅ"},
+		{Mini, Error, "ฅ(x ᴥ x)ฅ"},
 		{Full, Idle, "( •ᴥ• )"},
 		{Full, Success, "( ^ᴥ^ )"},
 		{Full, Error, "( xᴥx )"},

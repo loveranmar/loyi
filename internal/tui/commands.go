@@ -55,7 +55,7 @@ func (c *Chat) helpText() string {
 	var b strings.Builder
 	b.WriteString("\n" + c.s.Text.Render("commands") + "\n")
 	for _, l := range lines {
-		b.WriteString("  " + c.s.Accent.Render(pad(l.cmd, 26)) + c.s.Dim.Render(l.desc) + "\n")
+		b.WriteString("  " + c.s.Accent.Render(padTo(l.cmd, 26)) + c.s.Dim.Render(l.desc) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -79,7 +79,7 @@ func (c *Chat) usageText() string {
 		rows = append(rows, [2]string{"cache reads", fmt.Sprintf("%d", u.CacheRead)})
 	}
 	for _, r := range rows {
-		b.WriteString("  " + c.s.Dim.Render(pad(r[0], 22)) + c.s.Text.Render(r[1]) + "\n")
+		b.WriteString("  " + c.s.Dim.Render(padTo(r[0], 22)) + c.s.Text.Render(r[1]) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -90,10 +90,10 @@ func (c *Chat) agentCommand(args []string) (tea.Model, tea.Cmd) {
 		b.WriteString("\n" + c.s.Text.Render("agents") + c.s.Dim.Render("  (you're on "+c.sess.Agent.Label+")") + "\n")
 		for _, a := range agent.Agents {
 			marker := "  "
-			label := c.s.Dim.Render(pad(a.Label, 10))
+			label := c.s.Dim.Render(padTo(a.Label, 10))
 			if a.ID == c.sess.Agent.ID {
 				marker = c.s.Accent.Render("› ")
-				label = c.s.Text.Render(pad(a.Label, 10))
+				label = c.s.Text.Render(padTo(a.Label, 10))
 			}
 			b.WriteString(marker + label + c.s.Dim.Render(a.Tagline) + "\n")
 		}
@@ -166,7 +166,7 @@ func (c *Chat) modelCommand(args []string) (tea.Model, tea.Cmd) {
 	return c, tea.Println(c.s.Accent.Render("  → ") + c.s.Text.Render("model "+args[0]))
 }
 
-func pad(s string, n int) string {
+func padTo(s string, n int) string {
 	if len(s) >= n {
 		return s + " "
 	}

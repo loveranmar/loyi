@@ -38,32 +38,32 @@ const (
 	Error                  // failed, in terracotta x  x
 )
 
-// face is the eye set for a state. The mouth is always ᴥ. closed is the
-// blink/alternate eye; accent/danger pick a non-default color.
+// face holds the exact frames for a state. primary is the resting frame; alt
+// is the blink (idle/listening) or flutter (thinking) frame — empty for the
+// static success/error states. eye is the glyph used by the multi-line Full
+// variant, which substitutes rather than using literal frames. accent/danger
+// pick a non-default color.
 type face struct {
-	open   string
-	closed string
-	accent bool
-	danger bool
+	primary string
+	alt     string
+	eye     string
+	accent  bool
+	danger  bool
 }
 
-// faces is the single place to tweak how each state looks.
+// faces is the single place to tweak how each state looks. The mini frames are
+// written out literally so the exact spacing matches the brand spec.
 var faces = map[State]face{
-	Idle:      {open: "•", closed: "-"},
-	Listening: {open: "o", closed: "-"},
-	Thinking:  {open: "•", closed: "-"}, // flutters between the two
-	Success:   {open: "^", accent: true},
-	Error:     {open: "x", danger: true},
+	Idle:      {primary: "ฅ(•ᴥ•)ฅ", alt: "ฅ(-ᴥ-)ฅ", eye: "•"},
+	Listening: {primary: "ฅ(o ᴥ o)ฅ", alt: "ฅ(- ᴥ -)ฅ", eye: "o"},
+	Thinking:  {primary: "ฅ(- ᴥ -)ฅ", alt: "ฅ(• ᴥ •)ฅ", eye: "•"}, // flutters
+	Success:   {primary: "ฅ(^ᴥ^)ฅ", eye: "^", accent: true},
+	Error:     {primary: "ฅ(x ᴥ x)ฅ", eye: "x", danger: true},
 }
 
-// body renders a variant with the given eye glyph substituted in.
-func body(v Variant, eye string) string {
-	switch v {
-	case Full:
-		return "(\\_/)\n( " + eye + "ᴥ" + eye + " )\n/>   \\"
-	default:
-		return "ฅ(" + eye + "ᴥ" + eye + ")ฅ"
-	}
+// fullBody renders the multi-line Full variant with the eye glyph substituted.
+func fullBody(eye string) string {
+	return "(\\_/)\n( " + eye + "ᴥ" + eye + " )\n/>   \\"
 }
 
 func styleFor(f face, th theme.Theme) lipgloss.Style {
@@ -78,11 +78,14 @@ func styleFor(f face, th theme.Theme) lipgloss.Style {
 	}
 }
 
-// Render draws a static frame (open eyes) — for onboarding, version, and any
-// non-animated spot.
+// Render draws a static frame — for onboarding, version, and any non-animated
+// spot.
 func Render(v Variant, st State, th theme.Theme) string {
 	f := faces[st]
-	return styleFor(f, th).Render(body(v, f.open))
+	if v == Full {
+		return styleFor(f, th).Render(fullBody(f.eye))
+	}
+	return styleFor(f, th).Render(f.primary)
 }
 
 // TickMsg advances the animation. gen guards against stale ticks left over
@@ -176,16 +179,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 // View renders the current animation frame, styled for the theme.
 func (m Model) View() string {
 	f := faces[m.state]
-	eye := f.open
-	switch m.state {
-	case Idle, Listening:
-		if m.swap && f.closed != "" {
-			eye = f.closed
-		}
-	case Thinking:
-		if m.swap {
-			eye = f.closed
-		}
+	if m.Variant == Full {
+		return styleFor(f, m.th).Render(fullBody(f.eye))
 	}
-	return styleFor(f, m.th).Render(body(m.Variant, eye))
+	frame := f.primary
+	if m.swap && f.alt != "" {
+		frame = f.alt
+	}
+	return styleFor(f, m.th).Render(frame)
 }
