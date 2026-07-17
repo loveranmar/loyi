@@ -89,6 +89,7 @@ func runChat(cfg *config.Config) {
 		&tool.ReadTool{WS: ws}, &tool.WriteTool{WS: ws}, &tool.EditTool{WS: ws},
 		&tool.TreeTool{WS: ws}, &tool.LsTool{WS: ws}, &tool.GlobTool{WS: ws},
 		&tool.GrepTool{WS: ws}, &tool.RunTool{WS: ws},
+		&tool.WebSearchTool{}, &tool.WebFetchTool{},
 	)
 	sess := &agent.Session{
 		Provider:  p,

@@ -83,14 +83,23 @@ type Usage struct {
 	CacheRead    int
 }
 
+// ServerTool reports a tool the backend ran server-side (e.g. Anthropic's
+// hosted web search/fetch). loyi never executes these; it just surfaces them
+// in the transcript so the user sees what happened.
+type ServerTool struct {
+	Name  string // "web_search" or "web_fetch"
+	Query string // the search query or fetched url
+}
+
 // Chunk is one piece of a streamed response. Text arrives incrementally;
 // ToolCalls and Usage arrive once, on the final Done chunk.
 type Chunk struct {
-	Text      string
-	ToolCalls []ToolCall
-	Usage     *Usage
-	Done      bool
-	Err       error
+	Text       string
+	ToolCalls  []ToolCall
+	ServerTool *ServerTool
+	Usage      *Usage
+	Done       bool
+	Err        error
 }
 
 // Provider is a model backend. Implementations live in subpackages of

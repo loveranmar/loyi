@@ -140,6 +140,10 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 				text += chunk.Text
 				emit(TextEvent{chunk.Text})
 			}
+			if chunk.ServerTool != nil {
+				s.usage.ToolCalls++
+				emit(ToolStartEvent{Name: chunk.ServerTool.Name, Summary: serverToolSummary(chunk.ServerTool)})
+			}
 			if chunk.Done {
 				calls = chunk.ToolCalls
 				if chunk.Usage != nil {
@@ -197,6 +201,17 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 			s.appendToolResult(tc.ID, out, false, emit)
 		}
 	}
+}
+
+func serverToolSummary(st *provider.ServerTool) string {
+	verb := "search"
+	if st.Name == "web_fetch" {
+		verb = "fetch"
+	}
+	if st.Query == "" {
+		return verb
+	}
+	return verb + " " + st.Query
 }
 
 func (s *Session) appendToolResult(id, output string, isErr bool, emit func(Event)) {
