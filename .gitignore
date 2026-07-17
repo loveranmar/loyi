@@ -1,0 +1,11 @@
+# binaries
+/loyi
+/dist/
+
+# local env and editor noise
+.env
+.env.*
+*.log
+
+# local-only claude notes
+CLAUDE.local.md
