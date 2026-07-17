@@ -107,7 +107,7 @@ func NewChat(cfg *config.Config, sess *agent.Session, th theme.Theme) *Chat {
 	st.Focused.Text = c.s.Text       // typed text is full-bright primary
 	st.Focused.Placeholder = c.s.Dim // placeholder is dim
 	st.Cursor.Color = lipgloss.Color(th.Accent)
-	in.SetStyles(st)
+	c.input.SetStyles(st) // on the struct's copy — styling `in` would be lost
 	c.input.Prompt = "› "
 	return c
 }
