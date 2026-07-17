@@ -5,6 +5,8 @@
 // Switching themes swaps only the accent — structure never changes.
 package theme
 
+import "charm.land/lipgloss/v2"
+
 // Neutrals is the warm-toned ramp shared by every theme.
 type NeutralRamp struct {
 	Text       string // primary text
@@ -48,4 +50,27 @@ func Get(name string) Theme {
 		return t
 	}
 	return Default
+}
+
+// All returns every theme in stable display order, Default first.
+func All() []Theme {
+	return []Theme{Mauve, Ember, Sage, Honey}
+}
+
+// Styles is the small set of lipgloss styles the whole UI is built from.
+// Hierarchy comes from dim/bright contrast and whitespace; the accent is
+// used rarely (caret, active state, success).
+type Styles struct {
+	Text   lipgloss.Style
+	Dim    lipgloss.Style
+	Accent lipgloss.Style
+}
+
+// Styles builds the style set for this theme.
+func (t Theme) Styles() Styles {
+	return Styles{
+		Text:   lipgloss.NewStyle().Foreground(lipgloss.Color(Neutrals.Text)),
+		Dim:    lipgloss.NewStyle().Foreground(lipgloss.Color(Neutrals.Dim)),
+		Accent: lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)),
+	}
 }
