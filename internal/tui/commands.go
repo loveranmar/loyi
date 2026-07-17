@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -31,7 +32,7 @@ func (c *Chat) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "model":
 		return c.modelCommand(args)
 	case "loop":
-		return c, tea.Println(c.s.Dim.Render("  /loop isn't wired yet — it'll let the agent run a task on repeat until a goal is met."))
+		return c.loopCommand(args)
 	case "quit", "exit":
 		c.quit = true
 		return c, tea.Quit
@@ -48,7 +49,7 @@ func (c *Chat) helpText() string {
 		{"/model [id]", "override the model for this session"},
 		{"/usage", "tokens and tool calls this session (estimated)"},
 		{"/clear", "clear the conversation and start fresh"},
-		{"/loop", "run a task on repeat (coming soon)"},
+		{"/loop <n> <task>", "run a task, repeating up to n× until the agent says DONE"},
 		{"/quit", "leave loyi"},
 	}
 	var b strings.Builder
@@ -61,15 +62,24 @@ func (c *Chat) helpText() string {
 
 func (c *Chat) usageText() string {
 	u := c.sess.Usage()
+	in, out, est := u.Tokens()
+	inLabel, outLabel := "input tokens", "output tokens"
+	if est {
+		inLabel, outLabel = "input tokens (est.)", "output tokens (est.)"
+	}
 	var b strings.Builder
 	b.WriteString("\n" + c.s.Text.Render("session usage") + "\n")
 	rows := [][2]string{
 		{"turns", fmt.Sprintf("%d", u.Turns)},
 		{"tool calls", fmt.Sprintf("%d", u.ToolCalls)},
-		{"tokens (est.)", fmt.Sprintf("~%d", u.EstTokens())},
+		{inLabel, fmt.Sprintf("%d", in)},
+		{outLabel, fmt.Sprintf("%d", out)},
+	}
+	if u.CacheRead > 0 {
+		rows = append(rows, [2]string{"cache reads", fmt.Sprintf("%d", u.CacheRead)})
 	}
 	for _, r := range rows {
-		b.WriteString("  " + c.s.Dim.Render(pad(r[0], 16)) + c.s.Text.Render(r[1]) + "\n")
+		b.WriteString("  " + c.s.Dim.Render(pad(r[0], 22)) + c.s.Text.Render(r[1]) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -98,6 +108,33 @@ func (c *Chat) agentCommand(args []string) (tea.Model, tea.Cmd) {
 		}
 	}
 	return c, tea.Println(c.s.Dim.Render("  no agent called " + id + "  ·  try /agent to list them"))
+}
+
+const loopMax = 25
+
+func (c *Chat) loopCommand(args []string) (tea.Model, tea.Cmd) {
+	if c.working {
+		return c, tea.Println(c.s.Dim.Render("  already working — wait for the current turn to finish"))
+	}
+	// /loop <count> <task...>
+	if len(args) < 2 {
+		return c, tea.Println(c.s.Dim.Render("  usage: /loop <count> <task>   e.g. /loop 5 add tests until they all pass"))
+	}
+	count, err := strconv.Atoi(args[0])
+	if err != nil || count < 1 {
+		return c, tea.Println(c.s.Dim.Render("  first argument must be a number of iterations, e.g. /loop 5 <task>"))
+	}
+	if count > loopMax {
+		count = loopMax
+	}
+	task := strings.Join(args[1:], " ")
+	c.loopActive = true
+	c.loopTotal = count
+	c.loopLeft = count
+
+	echo := c.s.Accent.Render("↻") + " " + c.s.Text.Render(task) +
+		c.s.Dim.Render(fmt.Sprintf("  (looping up to %d×, stops when the agent says DONE)", count))
+	return c, c.beginTurn(task, echo)
 }
 
 func (c *Chat) effortCommand(args []string) (tea.Model, tea.Cmd) {

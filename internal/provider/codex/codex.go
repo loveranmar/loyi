@@ -57,30 +57,7 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		instr += "\n\n" + req.System
 	}
 
-	input := make([]map[string]any, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		// Tools aren't wired for the Codex backend yet; fold any tool result
-		// back in as user text so the conversation stays coherent.
-		role := string(m.Role)
-		text := m.Content
-		if m.ToolCallID != "" {
-			role, text = "user", "tool result:\n"+m.ToolResult
-		}
-		if text == "" {
-			continue
-		}
-		contentType := "input_text"
-		if m.Role == provider.RoleAssistant && m.ToolCallID == "" {
-			contentType = "output_text"
-		}
-		input = append(input, map[string]any{
-			"type": "message",
-			"role": role,
-			"content": []map[string]string{
-				{"type": contentType, "text": text},
-			},
-		})
-	}
+	input := buildInput(req.Messages)
 
 	effort := "medium"
 	if req.Effort != "" {
@@ -94,6 +71,16 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		"store":        false,
 		"reasoning":    map[string]string{"effort": effort, "summary": "auto"},
 		"include":      []string{"reasoning.encrypted_content"},
+	}
+	if len(req.Tools) > 0 {
+		tools := make([]map[string]any, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			tools = append(tools, map[string]any{
+				"type": "function", "name": t.Name,
+				"description": t.Description, "parameters": t.Schema,
+			})
+		}
+		body["tools"] = tools
 	}
 
 	payload, err := json.Marshal(body)
@@ -128,41 +115,131 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	go func() {
 		defer close(out)
 		defer res.Body.Close()
-		err := provider.SSEData(res.Body, func(data string) bool {
-			var ev struct {
-				Type     string `json:"type"`
-				Delta    string `json:"delta"`
-				Response struct {
-					Error *struct {
-						Message string `json:"message"`
-					} `json:"error"`
-				} `json:"response"`
-			}
-			if json.Unmarshal([]byte(data), &ev) != nil {
-				return true
-			}
-			switch ev.Type {
-			case "response.output_text.delta":
-				if ev.Delta != "" {
-					out <- provider.Chunk{Text: ev.Delta}
-				}
-			case "response.failed":
-				msg := "request failed"
-				if ev.Response.Error != nil {
-					msg = ev.Response.Error.Message
-				}
-				out <- provider.Chunk{Err: fmt.Errorf("chatgpt: %s", msg)}
-				return false
-			case "response.completed", "response.done":
-				return false
-			}
-			return true
-		})
+		st := &codexStream{out: out}
+		err := provider.SSEData(res.Body, st.event)
 		if err != nil {
 			out <- provider.Chunk{Err: err}
 			return
 		}
-		out <- provider.Chunk{Done: true}
+		out <- provider.Chunk{ToolCalls: st.calls, Usage: st.usage, Done: true}
 	}()
 	return out, nil
+}
+
+// buildInput converts loyi messages into Responses-API input items,
+// including function_call and function_call_output for tool round-trips.
+func buildInput(msgs []provider.Message) []map[string]any {
+	input := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		switch {
+		case m.ToolCallID != "":
+			input = append(input, map[string]any{
+				"type": "function_call_output", "call_id": m.ToolCallID, "output": m.ToolResult,
+			})
+		case m.Role == provider.RoleAssistant && len(m.ToolCalls) > 0:
+			if m.Content != "" {
+				input = append(input, textItem("assistant", "output_text", m.Content))
+			}
+			for _, tc := range m.ToolCalls {
+				input = append(input, map[string]any{
+					"type": "function_call", "call_id": tc.ID,
+					"name": tc.Name, "arguments": string(tc.Input),
+				})
+			}
+		case m.Content != "":
+			ct := "input_text"
+			if m.Role == provider.RoleAssistant {
+				ct = "output_text"
+			}
+			input = append(input, textItem(string(m.Role), ct, m.Content))
+		}
+	}
+	return input
+}
+
+func textItem(role, contentType, text string) map[string]any {
+	return map[string]any{
+		"type": "message", "role": role,
+		"content": []map[string]string{{"type": contentType, "text": text}},
+	}
+}
+
+// codexStream accumulates streamed text, function calls, and usage.
+type codexStream struct {
+	out   chan<- provider.Chunk
+	calls []provider.ToolCall
+	byID  map[string]int // response item id -> index into calls
+	usage *provider.Usage
+}
+
+func (s *codexStream) event(data string) bool {
+	var ev struct {
+		Type  string `json:"type"`
+		Delta string `json:"delta"`
+		Item  struct {
+			ID        string `json:"id"`
+			Type      string `json:"type"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"item"`
+		Response struct {
+			Usage *struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+	}
+	if json.Unmarshal([]byte(data), &ev) != nil {
+		return true
+	}
+	switch ev.Type {
+	case "response.output_text.delta":
+		if ev.Delta != "" {
+			s.out <- provider.Chunk{Text: ev.Delta}
+		}
+	case "response.output_item.added":
+		if ev.Item.Type == "function_call" {
+			if s.byID == nil {
+				s.byID = map[string]int{}
+			}
+			s.byID[ev.Item.ID] = len(s.calls)
+			s.calls = append(s.calls, provider.ToolCall{ID: ev.Item.CallID, Name: ev.Item.Name})
+		}
+	case "response.output_item.done":
+		if ev.Item.Type == "function_call" {
+			if i, ok := s.byID[ev.Item.ID]; ok {
+				if ev.Item.CallID != "" {
+					s.calls[i].ID = ev.Item.CallID
+				}
+				s.calls[i].Input = json.RawMessage(nonEmptyJSON(ev.Item.Arguments))
+			}
+		}
+	case "response.completed", "response.done":
+		if ev.Response.Usage != nil {
+			s.usage = &provider.Usage{
+				InputTokens:  ev.Response.Usage.InputTokens,
+				OutputTokens: ev.Response.Usage.OutputTokens,
+			}
+		}
+		return false
+	case "response.failed":
+		msg := "request failed"
+		if ev.Response.Error != nil {
+			msg = ev.Response.Error.Message
+		}
+		s.out <- provider.Chunk{Err: fmt.Errorf("chatgpt: %s", msg)}
+		return false
+	}
+	return true
+}
+
+func nonEmptyJSON(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "{}"
+	}
+	return s
 }

@@ -70,9 +70,10 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	}
 
 	body := map[string]any{
-		"model":    model,
-		"messages": buildMessages(req.System, req.Messages),
-		"stream":   true,
+		"model":          model,
+		"messages":       buildMessages(req.System, req.Messages),
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
 	}
 	if len(req.Tools) > 0 {
 		tools := make([]map[string]any, 0, len(req.Tools))
@@ -118,6 +119,7 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		defer res.Body.Close()
 		acc := map[int]*provider.ToolCall{}
 		var order []int
+		var usage *provider.Usage
 		err := provider.SSEData(res.Body, func(data string) bool {
 			if data == "[DONE]" {
 				return false
@@ -136,6 +138,10 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 						} `json:"tool_calls"`
 					} `json:"delta"`
 				} `json:"choices"`
+				Usage *struct {
+					PromptTokens     int `json:"prompt_tokens"`
+					CompletionTokens int `json:"completion_tokens"`
+				} `json:"usage"`
 				Error *struct {
 					Message string `json:"message"`
 				} `json:"error"`
@@ -146,6 +152,12 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 			if ev.Error != nil {
 				out <- provider.Chunk{Err: fmt.Errorf("%s: %s", c.ID, ev.Error.Message)}
 				return false
+			}
+			if ev.Usage != nil {
+				usage = &provider.Usage{
+					InputTokens:  ev.Usage.PromptTokens,
+					OutputTokens: ev.Usage.CompletionTokens,
+				}
 			}
 			if len(ev.Choices) == 0 {
 				return true
@@ -183,7 +195,7 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 			}
 			calls = append(calls, *c)
 		}
-		out <- provider.Chunk{ToolCalls: calls, Done: true}
+		out <- provider.Chunk{ToolCalls: calls, Usage: usage, Done: true}
 	}()
 	return out, nil
 }

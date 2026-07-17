@@ -41,17 +41,29 @@ func (PermissionEvent) isEvent() {}
 func (DoneEvent) isEvent()       {}
 func (ErrorEvent) isEvent()      {}
 
-// Usage is a rough accounting of a session's model traffic. Providers don't
-// all report token counts yet, so these are character-based estimates.
+// Usage accounts for a session's model traffic. Token counts come from the
+// provider when it reports them; otherwise a chars/4 estimate is used.
 type Usage struct {
 	Turns     int
 	ToolCalls int
-	CharsIn   int
-	CharsOut  int
+
+	InputTokens  int
+	OutputTokens int
+	CacheRead    int
+	Reported     bool // true once a provider reported real token counts
+
+	charsIn  int
+	charsOut int
 }
 
-// EstTokens is a crude chars/4 token estimate.
-func (u Usage) EstTokens() int { return (u.CharsIn + u.CharsOut) / 4 }
+// Tokens returns the input and output token totals and whether they are real
+// (provider-reported) or estimated.
+func (u Usage) Tokens() (in, out int, estimated bool) {
+	if u.Reported {
+		return u.InputTokens, u.OutputTokens, false
+	}
+	return u.charsIn / 4, u.charsOut / 4, true
+}
 
 // AutoApprove, when true, skips the permission prompt for mutating tools.
 type Session struct {
@@ -97,7 +109,7 @@ func (s *Session) toolDefs() []provider.ToolDef {
 func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 	s.history = append(s.history, provider.UserText(input))
 	s.usage.Turns++
-	s.usage.CharsIn += len(input)
+	s.usage.charsIn += len(input)
 
 	for {
 		if ctx.Err() != nil {
@@ -130,9 +142,15 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 			}
 			if chunk.Done {
 				calls = chunk.ToolCalls
+				if chunk.Usage != nil {
+					s.usage.Reported = true
+					s.usage.InputTokens += chunk.Usage.InputTokens
+					s.usage.OutputTokens += chunk.Usage.OutputTokens
+					s.usage.CacheRead += chunk.Usage.CacheRead
+				}
 			}
 		}
-		s.usage.CharsOut += len(text)
+		s.usage.charsOut += len(text)
 
 		// Record the assistant turn (text + any tool calls).
 		s.history = append(s.history, provider.Message{
@@ -183,7 +201,7 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 
 func (s *Session) appendToolResult(id, output string, isErr bool, emit func(Event)) {
 	s.history = append(s.history, provider.ToolResultMsg(id, output, isErr))
-	s.usage.CharsIn += len(output)
+	s.usage.charsIn += len(output)
 	// find the tool name for the event by matching the last assistant call
 	name := ""
 	for i := len(s.history) - 1; i >= 0; i-- {

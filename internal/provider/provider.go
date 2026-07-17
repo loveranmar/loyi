@@ -75,11 +75,20 @@ type Request struct {
 	Model    string // backend-specific model id; empty means the provider's default
 }
 
+// Usage reports token counts for a single model call, when the backend
+// provides them.
+type Usage struct {
+	InputTokens  int
+	OutputTokens int
+	CacheRead    int
+}
+
 // Chunk is one piece of a streamed response. Text arrives incrementally;
-// ToolCalls arrive once, complete, when the turn stops to use tools.
+// ToolCalls and Usage arrive once, on the final Done chunk.
 type Chunk struct {
 	Text      string
 	ToolCalls []ToolCall
+	Usage     *Usage
 	Done      bool
 	Err       error
 }

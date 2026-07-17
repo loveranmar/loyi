@@ -42,7 +42,8 @@ func newTestSession(t *testing.T, root string, turns [][]provider.Chunk) *Sessio
 	}
 	reg := tool.NewRegistry(
 		&tool.ReadTool{WS: ws}, &tool.WriteTool{WS: ws}, &tool.EditTool{WS: ws},
-		&tool.TreeTool{WS: ws}, &tool.LsTool{WS: ws}, &tool.GrepTool{WS: ws}, &tool.RunTool{WS: ws},
+		&tool.TreeTool{WS: ws}, &tool.LsTool{WS: ws}, &tool.GlobTool{WS: ws},
+		&tool.GrepTool{WS: ws}, &tool.RunTool{WS: ws},
 	)
 	return &Session{
 		Provider:  &scriptProvider{turns: turns},
@@ -136,14 +137,45 @@ func TestReadToolNoPermission(t *testing.T) {
 	}
 }
 
+func TestUsageReported(t *testing.T) {
+	dir := t.TempDir()
+	turns := [][]provider.Chunk{{
+		{Text: "hi"},
+		{Done: true, Usage: &provider.Usage{InputTokens: 120, OutputTokens: 8, CacheRead: 40}},
+	}}
+	s := newTestSession(t, dir, turns)
+	collect(s, "hello", false)
+	in, out, est := s.Usage().Tokens()
+	if est {
+		t.Error("usage should be reported, not estimated")
+	}
+	if in != 120 || out != 8 || s.Usage().CacheRead != 40 {
+		t.Errorf("usage = in:%d out:%d cache:%d", in, out, s.Usage().CacheRead)
+	}
+}
+
+func TestUsageEstimatedFallback(t *testing.T) {
+	dir := t.TempDir()
+	turns := [][]provider.Chunk{{{Text: "12345678"}, {Done: true}}} // no Usage
+	s := newTestSession(t, dir, turns)
+	collect(s, "abcd", false)
+	_, out, est := s.Usage().Tokens()
+	if !est {
+		t.Error("usage should fall back to estimate")
+	}
+	if out != 2 { // 8 chars / 4
+		t.Errorf("estimated out = %d, want 2", out)
+	}
+}
+
 func TestToolsAdvertisedToProvider(t *testing.T) {
 	dir := t.TempDir()
 	turns := [][]provider.Chunk{{{Text: "hi"}, {Done: true}}}
 	s := newTestSession(t, dir, turns)
 	collect(s, "hello", false)
 	sp := s.Provider.(*scriptProvider)
-	if len(sp.last.Tools) != 7 {
-		t.Errorf("advertised %d tools, want 7", len(sp.last.Tools))
+	if len(sp.last.Tools) != 8 {
+		t.Errorf("advertised %d tools, want 8", len(sp.last.Tools))
 	}
 	if !strings.Contains(sp.last.System, "loyi") {
 		t.Error("system prompt should mention loyi")

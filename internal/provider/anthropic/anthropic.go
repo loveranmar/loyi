@@ -167,7 +167,7 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 			out <- provider.Chunk{Err: err}
 			return
 		}
-		out <- provider.Chunk{ToolCalls: stream.finishedCalls(), Done: true}
+		out <- provider.Chunk{ToolCalls: stream.finishedCalls(), Usage: &stream.usage, Done: true}
 	}()
 	return out, nil
 }
@@ -178,12 +178,19 @@ type anthropicStream struct {
 	calls []provider.ToolCall
 	cur   int // index into calls of the block currently streaming (-1 = none)
 	buf   strings.Builder
+	usage provider.Usage
 }
 
 func (s *anthropicStream) event(data string) bool {
 	var ev struct {
-		Type         string `json:"type"`
-		Index        int    `json:"index"`
+		Type    string `json:"type"`
+		Index   int    `json:"index"`
+		Message struct {
+			Usage struct {
+				InputTokens     int `json:"input_tokens"`
+				CacheReadTokens int `json:"cache_read_input_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
 		ContentBlock struct {
 			Type string `json:"type"`
 			ID   string `json:"id"`
@@ -194,6 +201,9 @@ func (s *anthropicStream) event(data string) bool {
 			Text        string `json:"text"`
 			PartialJSON string `json:"partial_json"`
 		} `json:"delta"`
+		Usage struct {
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
@@ -202,6 +212,13 @@ func (s *anthropicStream) event(data string) bool {
 		return true
 	}
 	switch ev.Type {
+	case "message_start":
+		s.usage.InputTokens = ev.Message.Usage.InputTokens
+		s.usage.CacheRead = ev.Message.Usage.CacheReadTokens
+	case "message_delta":
+		if ev.Usage.OutputTokens > 0 {
+			s.usage.OutputTokens = ev.Usage.OutputTokens
+		}
 	case "content_block_start":
 		if ev.ContentBlock.Type == "tool_use" {
 			s.calls = append(s.calls, provider.ToolCall{ID: ev.ContentBlock.ID, Name: ev.ContentBlock.Name})

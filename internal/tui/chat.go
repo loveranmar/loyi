@@ -38,9 +38,16 @@ type Chat struct {
 	toolLine string          // live tool activity line
 	pending  *agent.PermissionEvent
 
+	// loop state (/loop)
+	loopActive bool
+	loopLeft   int
+	loopTotal  int
+
 	cancel context.CancelFunc
 	quit   bool
 }
+
+const loopContinue = "Continue with the task. When it is fully complete, reply with only the word: DONE"
 
 func NewChat(cfg *config.Config, sess *agent.Session, th theme.Theme) *Chat {
 	in := textinput.New()
@@ -133,6 +140,7 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "ctrl+c":
 		if c.working && c.cancel != nil {
+			c.stopLoop()
 			c.cancel()
 			return c, tea.Println(c.s.Dim.Render("  interrupted"))
 		}
@@ -163,6 +171,12 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (c *Chat) startTurn(text string) (tea.Model, tea.Cmd) {
 	echo := c.s.Accent.Render("›") + " " + c.s.Text.Render(text)
+	return c, c.beginTurn(text, echo)
+}
+
+// beginTurn kicks off one agent turn, printing echo above the live view and
+// starting the event pump. echo may be empty for a silent (loop) step.
+func (c *Chat) beginTurn(text, echo string) tea.Cmd {
 	c.working = true
 	c.spinner = 0
 	c.stream.Reset()
@@ -176,7 +190,41 @@ func (c *Chat) startTurn(text string) (tea.Model, tea.Cmd) {
 		sess.Run(ctx, text, func(e agent.Event) { events <- e })
 	}()
 
-	return c, tea.Batch(tea.Println(echo), c.waitEvent(), c.tick())
+	cmds := []tea.Cmd{c.waitEvent(), c.tick()}
+	if echo != "" {
+		cmds = append([]tea.Cmd{tea.Println(echo)}, cmds...)
+	}
+	return tea.Batch(cmds...)
+}
+
+// loopNext decides whether to run another loop iteration after a turn ended
+// with the given final assistant text. Returns nil when the loop is inactive
+// or should stop.
+func (c *Chat) loopNext(final string) tea.Cmd {
+	if !c.loopActive {
+		return nil
+	}
+	if isDone(final) {
+		c.loopActive = false
+		return tea.Println(c.s.Accent.Render("  ✓ ") + c.s.Dim.Render("loop done — agent reported the task complete"))
+	}
+	c.loopLeft--
+	if c.loopLeft <= 0 {
+		c.loopActive = false
+		return tea.Println(c.s.Dim.Render(fmt.Sprintf("  loop stopped after %d iterations", c.loopTotal)))
+	}
+	label := c.s.Accent.Render("  ↻ ") + c.s.Dim.Render(fmt.Sprintf("loop %d/%d", c.loopTotal-c.loopLeft+1, c.loopTotal))
+	return c.beginTurn(loopContinue, label)
+}
+
+func isDone(s string) bool {
+	s = strings.TrimSpace(s)
+	return s == "DONE" || strings.HasPrefix(s, "DONE") || strings.HasSuffix(s, "DONE")
+}
+
+func (c *Chat) stopLoop() {
+	c.loopActive = false
+	c.loopLeft = 0
 }
 
 func (c *Chat) waitEvent() tea.Cmd {
@@ -216,15 +264,24 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 	case agent.DoneEvent:
 		c.working = false
 		c.cancel = nil
-		if s := strings.TrimSpace(c.stream.String()); s != "" {
-			c.stream.Reset()
-			return c, tea.Println(c.s.Text.Render(s))
+		final := strings.TrimSpace(c.stream.String())
+		c.stream.Reset()
+		var cmds []tea.Cmd
+		if final != "" {
+			cmds = append(cmds, tea.Println(c.s.Text.Render(final)))
 		}
-		return c, nil
+		if cont := c.loopNext(final); cont != nil {
+			cmds = append(cmds, cont)
+		}
+		if len(cmds) == 0 {
+			return c, nil
+		}
+		return c, tea.Sequence(cmds...)
 
 	case agent.ErrorEvent:
 		c.working = false
 		c.cancel = nil
+		c.stopLoop()
 		var cmds []tea.Cmd
 		if s := strings.TrimSpace(c.stream.String()); s != "" {
 			cmds = append(cmds, tea.Println(c.s.Text.Render(s)))

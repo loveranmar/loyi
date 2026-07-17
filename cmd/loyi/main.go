@@ -73,7 +73,8 @@ func runChat(cfg *config.Config) {
 	}
 	reg := tool.NewRegistry(
 		&tool.ReadTool{WS: ws}, &tool.WriteTool{WS: ws}, &tool.EditTool{WS: ws},
-		&tool.TreeTool{WS: ws}, &tool.LsTool{WS: ws}, &tool.GrepTool{WS: ws}, &tool.RunTool{WS: ws},
+		&tool.TreeTool{WS: ws}, &tool.LsTool{WS: ws}, &tool.GlobTool{WS: ws},
+		&tool.GrepTool{WS: ws}, &tool.RunTool{WS: ws},
 	)
 	sess := &agent.Session{
 		Provider:  p,
