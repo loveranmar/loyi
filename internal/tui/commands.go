@@ -29,6 +29,8 @@ func (c *Chat) runCommand(line string) (tea.Model, tea.Cmd) {
 		return c.agentCommand(args)
 	case "effort":
 		return c.effortCommand(args)
+	case "permission", "permissions", "perm":
+		return c.permissionCommand(args)
 	case "model", "models":
 		return c.modelCommand(args)
 	case "connect", "login", "provider":
@@ -48,6 +50,7 @@ func (c *Chat) helpText() string {
 		{"/help", "show this list"},
 		{"/agent [id]", "switch persona: plan · build · ship (no id lists them)"},
 		{"/effort [low|medium|high]", "reasoning effort (no arg shows current)"},
+		{"/permission [mode]", "how edits are gated: ask · accept-edits · auto · bypass"},
 		{"/model [id]", "pick a model (no id opens the picker across all providers)"},
 		{"/connect", "connect another provider (claude, chatgpt, api key, custom)"},
 		{"/usage", "tokens and tool calls this session (estimated)"},
@@ -155,6 +158,58 @@ func (c *Chat) effortCommand(args []string) (tea.Model, tea.Cmd) {
 	default:
 		return c, tea.Println(c.s.Dim.Render("  effort must be low, medium, or high"))
 	}
+}
+
+var permModes = []struct {
+	perm agent.Perm
+	desc string
+}{
+	{agent.PermAsk, "ask before every edit and command (default)"},
+	{agent.PermAcceptEdits, "auto-accept file edits, still ask before commands"},
+	{agent.PermAuto, "auto-run what's clearly safe, ask when unsure"},
+	{agent.PermBypass, "never ask — full autonomy"},
+}
+
+func (c *Chat) permissionCommand(args []string) (tea.Model, tea.Cmd) {
+	cur := c.sess.Perm
+	if cur == "" {
+		cur = agent.PermAsk
+	}
+	if len(args) == 0 {
+		var b strings.Builder
+		b.WriteString("\n" + c.s.Text.Render("permission") + c.s.Dim.Render("  (on "+cur.Label()+")") + "\n")
+		for _, m := range permModes {
+			marker := "  "
+			label := c.s.Dim.Render(padTo(string(m.perm), 14))
+			if m.perm == cur {
+				marker = c.s.Accent.Render("› ")
+				label = c.s.Text.Render(padTo(string(m.perm), 14))
+			}
+			b.WriteString(marker + label + c.s.Dim.Render(m.desc) + "\n")
+		}
+		b.WriteString(c.s.Dim.Render("  set with /permission <mode>"))
+		return c, tea.Println(strings.TrimRight(b.String(), "\n"))
+	}
+	mode, ok := parsePerm(args[0])
+	if !ok {
+		return c, tea.Println(indent(c.s.Dim.Render("modes: ask · accept-edits · auto · bypass")))
+	}
+	c.sess.Perm = mode
+	return c, tea.Println(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(mode.Label()) + c.s.Dim.Render(" mode")))
+}
+
+func parsePerm(s string) (agent.Perm, bool) {
+	switch strings.ToLower(s) {
+	case "ask", "default", "prompt":
+		return agent.PermAsk, true
+	case "accept-edits", "accept", "edits", "acceptedits":
+		return agent.PermAcceptEdits, true
+	case "auto":
+		return agent.PermAuto, true
+	case "bypass", "yolo", "full", "none":
+		return agent.PermBypass, true
+	}
+	return "", false
 }
 
 func (c *Chat) modelCommand(args []string) (tea.Model, tea.Cmd) {

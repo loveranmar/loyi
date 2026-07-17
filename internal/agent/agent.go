@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/loveranmar/loyi/internal/provider"
@@ -65,19 +66,68 @@ func (u Usage) Tokens() (in, out int, estimated bool) {
 	return u.charsIn / 4, u.charsOut / 4, true
 }
 
-// AutoApprove, when true, skips the permission prompt for mutating tools.
+// Perm is how the agent gates mutating tool calls.
+type Perm string
+
+const (
+	// PermAsk prompts before every mutating call (the default).
+	PermAsk Perm = "ask"
+	// PermAcceptEdits auto-approves file writes/edits, but still asks before
+	// running shell commands.
+	PermAcceptEdits Perm = "accept-edits"
+	// PermAuto auto-approves anything it's confident is safe, and asks when it
+	// isn't sure (unknown or dangerous shell commands).
+	PermAuto Perm = "auto"
+	// PermBypass never asks.
+	PermBypass Perm = "bypass"
+)
+
+// Label is a short human name for the mode.
+func (p Perm) Label() string {
+	switch p {
+	case PermAcceptEdits:
+		return "accept edits"
+	case PermAuto:
+		return "auto"
+	case PermBypass:
+		return "bypass"
+	default:
+		return "ask"
+	}
+}
+
 type Session struct {
-	Provider    provider.Provider
-	Tools       *tool.Registry
-	Agent       Agent
-	Effort      provider.Effort
-	Model       string
-	AutoApprove bool
+	Provider provider.Provider
+	Tools    *tool.Registry
+	Agent    Agent
+	Effort   provider.Effort
+	Model    string
+	Perm     Perm
 
 	Workspace string
 	history   []provider.Message
 	usage     Usage
 }
+
+// needsApproval reports whether a mutating call must be confirmed by the user
+// under the current permission mode.
+func (s *Session) needsApproval(t tool.Tool, input json.RawMessage) bool {
+	switch s.Perm {
+	case PermBypass:
+		return false
+	case PermAcceptEdits:
+		return !isFileEdit(t.Name())
+	case PermAuto:
+		if a, ok := t.(tool.AutoSafe); ok {
+			return !a.AutoSafe(input)
+		}
+		return false // non-command mutations (file edits) are safe to auto-run
+	default: // PermAsk and anything unset
+		return true
+	}
+}
+
+func isFileEdit(name string) bool { return name == "write" || name == "edit" }
 
 func (s *Session) Usage() Usage { return s.usage }
 
@@ -177,7 +227,7 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 			summary := t.Summary(tc.Input)
 			emit(ToolStartEvent{Name: tc.Name, Summary: summary})
 
-			if t.Mutating(tc.Input) && !s.AutoApprove {
+			if t.Mutating(tc.Input) && s.needsApproval(t, tc.Input) {
 				reply := make(chan bool, 1)
 				emit(PermissionEvent{Summary: summary, Reply: reply})
 				var approved bool

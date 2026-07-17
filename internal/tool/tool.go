@@ -25,6 +25,13 @@ type Tool interface {
 	Run(ctx context.Context, input json.RawMessage) (string, error)
 }
 
+// AutoSafe is an optional interface for mutating tools. In "auto" permission
+// mode, a call is run without asking only when AutoSafe reports true; tools
+// that don't implement it are treated as safe to auto-run.
+type AutoSafe interface {
+	AutoSafe(input json.RawMessage) bool
+}
+
 // Registry is an ordered set of tools.
 type Registry struct {
 	tools map[string]Tool

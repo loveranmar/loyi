@@ -299,10 +299,10 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			c.pending = nil
 			return c, resume()
 		case "a":
-			c.sess.AutoApprove = true
+			c.sess.Perm = agent.PermBypass
 			c.pending.Reply <- true
 			c.pending = nil
-			return c, resume(tea.Println(indent(c.s.Dim.Render("auto-approving tool calls for this session"))))
+			return c, resume(tea.Println(indent(c.s.Dim.Render("bypass mode — won't ask again this session  ·  /permission to change"))))
 		case "n", "esc":
 			c.pending.Reply <- false
 			c.pending = nil
@@ -617,6 +617,10 @@ func (c *Chat) statusLine() string {
 			right = c.s.Dim.Render("⌃c stop")
 		} else {
 			right = c.s.Dim.Render("⏎ send   ⌃c quit")
+		}
+		// surface a looser permission mode so it's never a surprise
+		if c.sess.Perm != "" && c.sess.Perm != agent.PermAsk {
+			right = c.s.Accent.Render(c.sess.Perm.Label()) + c.s.Dim.Render("  ·  ") + right
 		}
 	}
 
