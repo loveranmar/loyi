@@ -44,14 +44,20 @@ const pad = 2
 // Chat is loyi's interactive coding interface: a scrolling conversation with
 // the agent, inline (not altscreen) so history stays in the terminal.
 type Chat struct {
-	cfg   *config.Config
-	set   *config.Settings // loyi.json; nil falls back to defaults
-	sess  *agent.Session
-	th    theme.Theme
-	s     theme.Styles
-	input textinput.Model
-	pup   mascot.Model
-	width int
+	cfg    *config.Config
+	set    *config.Settings // loyi.json; nil falls back to defaults
+	sess   *agent.Session
+	th     theme.Theme
+	s      theme.Styles
+	input  textinput.Model
+	pup    mascot.Model
+	width  int
+	height int
+
+	// current round of conversation, kept in the managed view so tool blocks
+	// stay expandable; flushed to scrollback when the next turn starts
+	items []turnItem
+	focus int // index into items of the focused block; -1 = input
 
 	// status word rotation
 	cycler  *mascot.Cycler
@@ -73,7 +79,6 @@ type Chat struct {
 	stream     strings.Builder // assistant text for the current segment
 	toolLine   string          // live tool activity: the running call's summary
 	toolTarget string          // what the running call is acting on (path, pattern…)
-	toolBlock  bool            // a ✓/✗ line was printed since the last text block
 	pending    *agent.PermissionEvent
 
 	// loop state (/loop)
@@ -103,6 +108,7 @@ func NewChat(cfg *config.Config, set *config.Settings, sess *agent.Session, th t
 		word:       "ready",
 		providerID: cfg.DefaultProvider,
 		events:     make(chan agent.Event, 64),
+		focus:      -1,
 	}
 	st := textinput.DefaultDarkStyles()
 	st.Focused.Prompt = c.s.Accent
@@ -273,6 +279,7 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		c.width = msg.Width
+		c.height = msg.Height
 		c.input.SetWidth(c.boxContentWidth() - 5)
 		return c, nil
 
@@ -352,9 +359,10 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "a":
 			rule := config.RuleFor(c.pending.Tool, c.pending.Target)
 			note := fmt.Sprintf("always allowing %s — saved to %s", rule, ruleFileName(c.set))
+			c.appendText(indent(c.s.Dim.Render(note)))
 			c.pending.Reply <- agent.ReplyAlways
 			c.pending = nil
-			return c, resume(tea.Println("\n" + indent(c.s.Dim.Render(note))))
+			return c, resume()
 		case "n", "esc":
 			c.pending.Reply <- agent.ReplyDeny
 			c.pending = nil
@@ -378,13 +386,24 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			c.stopLoop()
 			c.working = false
 			c.cancel()
-			return c, tea.Sequence(tea.Println(indent(c.s.Dim.Render("interrupted"))), c.setActivity(mascot.ActReady))
+			c.appendText(indent(c.s.Dim.Render("interrupted")))
+			return c, c.setActivity(mascot.ActReady)
 		}
 		c.quit = true
 		return c, tea.Quit
 	case "ctrl+d":
 		c.quit = true
 		return c, tea.Quit
+	}
+
+	// A focused tool block owns the keyboard until focus returns to the input.
+	if c.focus >= 0 {
+		return c.handleBlockKey(key)
+	}
+
+	switch key {
+	case "up":
+		return c, c.focusLastBlock()
 	case "enter":
 		if c.working {
 			return c, nil
@@ -405,18 +424,92 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return c, cmd
 }
 
+// focusLastBlock moves focus from the input to the nearest (last) expandable
+// block, if there is one.
+func (c *Chat) focusLastBlock() tea.Cmd {
+	idxs := c.focusableItems()
+	if len(idxs) == 0 {
+		return nil
+	}
+	c.focus = idxs[len(idxs)-1]
+	c.input.Blur()
+	return nil
+}
+
+// handleBlockKey drives the focused block: up/down (and j/k) move focus or
+// scroll an overflowing full view, enter/tab cycles states, esc backs out.
+func (c *Chat) handleBlockKey(key string) (tea.Model, tea.Cmd) {
+	b := c.focusedBlock()
+	if b == nil {
+		return c, c.refocusInput()
+	}
+	scrolling := b.state == blockFull && b.overflows()
+	switch key {
+	case "up", "k":
+		if scrolling {
+			b.vp.ScrollUp(1)
+			return c, nil
+		}
+		c.moveFocus(-1)
+	case "down", "j":
+		if scrolling {
+			b.vp.ScrollDown(1)
+			return c, nil
+		}
+		if !c.moveFocus(1) {
+			return c, c.refocusInput()
+		}
+	case "enter", "tab":
+		b.cycle(c)
+	case "esc":
+		if b.state != blockCollapsed {
+			b.state = blockCollapsed
+			return c, nil
+		}
+		return c, c.refocusInput()
+	}
+	return c, nil
+}
+
+// moveFocus shifts focus among expandable blocks; false means it walked past
+// the last one (back toward the input).
+func (c *Chat) moveFocus(dir int) bool {
+	idxs := c.focusableItems()
+	cur := -1
+	for i, idx := range idxs {
+		if idx == c.focus {
+			cur = i
+			break
+		}
+	}
+	next := cur + dir
+	if next < 0 {
+		return true // already at the first block — stay
+	}
+	if next >= len(idxs) {
+		return false
+	}
+	c.focus = idxs[next]
+	return true
+}
+
+func (c *Chat) refocusInput() tea.Cmd {
+	c.focus = -1
+	return c.input.Focus()
+}
+
 func (c *Chat) startTurn(text string) (tea.Model, tea.Cmd) {
 	return c, c.beginTurn(text, "\n"+c.userLine(text))
 }
 
-// beginTurn kicks off one agent turn, printing echo above the live view and
-// starting the event pump. echo may be empty for a silent (loop) step.
+// beginTurn kicks off one agent turn: the previous round flushes to
+// scrollback, echo prints above the live view, and the event pump starts.
+// echo may be empty for a silent (loop) step.
 func (c *Chat) beginTurn(text, echo string) tea.Cmd {
 	c.working = true
 	c.stream.Reset()
 	c.toolLine = ""
 	c.toolTarget = ""
-	c.toolBlock = false
 
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
@@ -426,11 +519,29 @@ func (c *Chat) beginTurn(text, echo string) tea.Cmd {
 		sess.Run(ctx, text, func(e agent.Event) { events <- e })
 	}()
 
-	cmds := []tea.Cmd{c.waitEvent(), c.setActivity(mascot.ActThinking)}
+	cmds := c.flushTurn()
 	if echo != "" {
-		cmds = append([]tea.Cmd{tea.Println(echo)}, cmds...)
+		cmds = append(cmds, tea.Println(echo))
 	}
-	return tea.Batch(cmds...)
+	cmds = append(cmds, c.waitEvent(), c.setActivity(mascot.ActThinking))
+	return tea.Sequence(cmds...)
+}
+
+// flushTurn commits the current round to scrollback — blocks collapse back to
+// single lines — and clears the live transcript.
+func (c *Chat) flushTurn() []tea.Cmd {
+	var cmds []tea.Cmd
+	for _, it := range c.items {
+		s := it.text
+		if it.block != nil {
+			it.block.state = blockCollapsed
+			s = c.blockView(it.block, false)
+		}
+		cmds = append(cmds, tea.Println("\n"+s))
+	}
+	c.items = nil
+	c.focus = -1
+	return cmds
 }
 
 // activityForTool maps a tool name to the status activity: wolf verbs for
@@ -455,12 +566,14 @@ func (c *Chat) loopNext(final string) tea.Cmd {
 	}
 	if isDone(final) {
 		c.loopActive = false
-		return tea.Println(c.s.Accent.Render("  ✓ ") + c.s.Dim.Render("loop done — agent reported the task complete"))
+		c.appendText(c.s.Accent.Render("  ✓ ") + c.s.Dim.Render("loop done — agent reported the task complete"))
+		return nil
 	}
 	c.loopLeft--
 	if c.loopLeft <= 0 {
 		c.loopActive = false
-		return tea.Println(c.s.Dim.Render(fmt.Sprintf("  loop stopped after %d iterations", c.loopTotal)))
+		c.appendText(c.s.Dim.Render(fmt.Sprintf("  loop stopped after %d iterations", c.loopTotal)))
+		return nil
 	}
 	label := c.s.Accent.Render("  ↻ ") + c.s.Dim.Render(fmt.Sprintf("loop %d/%d", c.loopTotal-c.loopLeft+1, c.loopTotal))
 	return c.beginTurn(loopContinue, label)
@@ -492,26 +605,19 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 		return c, c.waitEvent()
 
 	case agent.ToolStartEvent:
-		var cmds []tea.Cmd
 		if s := strings.TrimSpace(c.stream.String()); s != "" {
-			cmds = append(cmds, tea.Println("\n"+c.loyiLine(s)))
+			c.appendText(c.loyiLine(s))
 			c.stream.Reset()
-			c.toolBlock = false
 		}
 		c.toolLine = e.Summary
 		c.toolTarget = targetOf(e.Summary)
-		cmds = append(cmds, c.setActivity(activityForTool(e.Name)), c.waitEvent())
-		return c, tea.Batch(cmds...)
+		return c, tea.Batch(c.setActivity(activityForTool(e.Name)), c.waitEvent())
 
 	case agent.ToolResultEvent:
 		c.toolLine = ""
-		line := c.toolResultLine(e)
-		if !c.toolBlock {
-			line = "\n" + line // first action under a message gets its own block
-			c.toolBlock = true
-		}
+		c.appendBlock(c.newBlock(e))
 		// after a tool, the model is thinking again
-		return c, tea.Batch(tea.Println(line), c.setActivity(mascot.ActThinking), c.waitEvent())
+		return c, tea.Batch(c.setActivity(mascot.ActThinking), c.waitEvent())
 
 	case agent.PermissionEvent:
 		c.pending = &e
@@ -524,50 +630,27 @@ func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
 		c.cancel = nil
 		final := strings.TrimSpace(c.stream.String())
 		c.stream.Reset()
-		var cmds []tea.Cmd
 		if final != "" {
-			cmds = append(cmds, tea.Println("\n"+c.loyiLine(final)))
-			c.toolBlock = false
+			c.appendText(c.loyiLine(final))
 		}
 		if cont := c.loopNext(final); cont != nil {
-			cmds = append(cmds, cont)
-		} else {
-			// no more loop work — flash success, then settle back to ready
-			cmds = append(cmds, c.setActivity(mascot.ActSuccess), restMascot())
+			return c, cont
 		}
-		return c, tea.Sequence(cmds...)
+		// no more loop work — flash success, then settle back to ready
+		return c, tea.Sequence(c.setActivity(mascot.ActSuccess), restMascot())
 
 	case agent.ErrorEvent:
 		c.working = false
 		c.cancel = nil
 		c.stopLoop()
-		var cmds []tea.Cmd
 		if s := strings.TrimSpace(c.stream.String()); s != "" {
-			cmds = append(cmds, tea.Println("\n"+c.loyiLine(s)))
+			c.appendText(c.loyiLine(s))
 			c.stream.Reset()
 		}
-		cmds = append(cmds, tea.Println("\n"+indent(c.s.Danger.Render("✗ ")+c.s.Dim.Render(e.Err.Error()))))
-		c.toolBlock = false
-		cmds = append(cmds, c.setActivity(mascot.ActError), restMascot())
-		return c, tea.Sequence(cmds...)
+		c.appendText(indent(c.s.Danger.Render("✗ ") + c.s.Dim.Render(e.Err.Error())))
+		return c, tea.Sequence(c.setActivity(mascot.ActError), restMascot())
 	}
 	return c, c.waitEvent()
-}
-
-// toolResultLine resolves a finished tool call into its transcript line:
-// "✓ index.html · 1 line" — mark in accent (✗ in terracotta on error), target
-// primary, detail dim.
-func (c *Chat) toolResultLine(e agent.ToolResultEvent) string {
-	target := c.toolTarget
-	if target == "" {
-		target = e.Name
-	}
-	if e.IsError {
-		return toolIndent() + c.s.Danger.Render("✗") + " " +
-			c.s.Text.Render(target) + c.s.Dim.Render(" · "+firstLine(e.Output))
-	}
-	return toolIndent() + c.s.Accent.Render("✓") + " " +
-		c.s.Text.Render(target) + c.s.Dim.Render(" · "+toolDetail(e.Name, e.Output))
 }
 
 // targetOf pulls what a tool acts on from its summary ("write index.html" →
@@ -654,6 +737,14 @@ func (c *Chat) View() tea.View {
 
 	var b strings.Builder
 
+	// the current round: loyi's messages and expandable tool blocks
+	for i, it := range c.items {
+		s := it.text
+		if it.block != nil {
+			s = c.blockView(it.block, i == c.focus)
+		}
+		b.WriteString("\n" + s + "\n")
+	}
 	// live assistant text streams above the box until it's committed
 	if s := strings.TrimSpace(c.stream.String()); s != "" {
 		b.WriteString("\n" + c.loyiLine(s) + "\n")
@@ -774,9 +865,14 @@ func (c *Chat) statusLine() string {
 			wordStyle = c.s.Danger
 		}
 		left = c.pupView() + wordStyle.Render(c.word)
-		if c.working {
+		switch {
+		case c.focus >= 0:
+			right = c.s.Dim.Render("↑↓ move   ⏎ toggle   esc back")
+		case c.working:
 			right = c.s.Dim.Render("⌃c stop")
-		} else {
+		case len(c.focusableItems()) > 0:
+			right = c.s.Dim.Render("↑ blocks   ⏎ send   ⌃c quit")
+		default:
 			right = c.s.Dim.Render("⏎ send   ⌃c quit")
 		}
 	}

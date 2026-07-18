@@ -16,6 +16,7 @@ import (
 	"github.com/loveranmar/loyi/internal/mascot"
 	"github.com/loveranmar/loyi/internal/provider/factory"
 	"github.com/loveranmar/loyi/internal/theme"
+	"github.com/loveranmar/loyi/internal/tool"
 )
 
 func TestDumpScreens(t *testing.T) {
@@ -65,14 +66,53 @@ func TestDumpScreens(t *testing.T) {
 	c3.pup.SetState(mascot.Listening)
 	dump("chat-3-permission", transcript+c3.View().Content)
 
-	// 4. chat, finished conversation (the target layout)
-	c4 := newChatFor()
-	c4.toolTarget = "index.html"
-	done := transcript +
-		"\n" + c4.loyiLine("i'll put together a landing page for you.") + "\n" +
-		"\n" + c4.toolResultLine(agent.ToolResultEvent{Name: "write", Output: "wrote index.html · 1 line"}) + "\n" +
-		"\n" + c4.loyiLine("done — starter landing page is in index.html.\nwant a signup form next?") + "\n"
-	dump("chat-4-conversation", done+c4.View().Content)
+	// demoRound builds a finished round with an expandable write block.
+	diff := "+ <!doctype html>\n+ <html>\n+ <head>\n+   <title>hi</title>\n+ </head>\n+ <body>\n+   <h1>hello</h1>\n+ </body>\n+ </html>"
+	demoRound := func() (*Chat, *toolBlock) {
+		ch := newChatFor()
+		ch.appendText(ch.loyiLine("i'll put together a landing page for you."))
+		ch.toolTarget = "index.html"
+		blk := ch.newBlock(agent.ToolResultEvent{Name: "write",
+			Display: &tool.DisplayInfo{Content: diff, Detail: "9 lines", OK: true}})
+		ch.appendBlock(blk)
+		ch.appendText(ch.loyiLine("done — starter landing page is in index.html.\nwant a signup form next?"))
+		return ch, blk
+	}
+
+	// 4. chat, finished conversation (blocks collapsed, input focused)
+	c4, _ := demoRound()
+	dump("chat-4-conversation", transcript+c4.View().Content)
+
+	// 6. block focused (collapsed) — accent marker + expand hint
+	c6, _ := demoRound()
+	c6.focusLastBlock()
+	dump("chat-6-block-focused", transcript+c6.View().Content)
+
+	// 7. block peek — first lines + more hint
+	c7, b7 := demoRound()
+	c7.focusLastBlock()
+	b7.cycle(c7)
+	dump("chat-7-block-peek", transcript+c7.View().Content)
+
+	// 8. block full
+	c8, b8 := demoRound()
+	c8.focusLastBlock()
+	b8.cycle(c8)
+	b8.cycle(c8)
+	dump("chat-8-block-full", transcript+c8.View().Content)
+
+	// 9. run block, full: command output with exit status
+	c9 := newChatFor()
+	c9.appendText(c9.loyiLine("tests aren't happy — one failure."))
+	c9.toolTarget = "go test ./..."
+	rb := c9.newBlock(agent.ToolResultEvent{Name: "run",
+		Display: &tool.DisplayInfo{
+			Content: "--- FAIL: TestSignup (0.00s)\n    signup_test.go:14: want 200, got 500\nFAIL\nFAIL\texample.com/site\t0.012s",
+			Detail:  "exit 1", OK: false}})
+	c9.appendBlock(rb)
+	c9.focusLastBlock()
+	rb.cycle(c9)
+	dump("chat-9-run-block", transcript+c9.View().Content)
 
 	// 5. model picker
 	c5 := newChatFor()

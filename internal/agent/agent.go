@@ -24,6 +24,9 @@ type ToolResultEvent struct {
 	Name    string
 	Output  string
 	IsError bool
+	// Display is a richer UI payload (diff, command output + exit status)
+	// from tools that implement tool.Displayer; nil otherwise.
+	Display *tool.DisplayInfo
 }
 
 // PermissionEvent asks the UI to approve a mutating tool call. The UI must
@@ -225,12 +228,20 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 				s.appendToolResult(tc.ID, "error: "+err.Error(), true, emit)
 				continue
 			}
-			s.appendToolResult(tc.ID, out, false, emit)
+			var display *tool.DisplayInfo
+			if d, ok := t.(tool.Displayer); ok {
+				display = d.LastDisplay()
+			}
+			s.appendToolResultDisplay(tc.ID, out, false, display, emit)
 		}
 	}
 }
 
 func (s *Session) appendToolResult(id, output string, isErr bool, emit func(Event)) {
+	s.appendToolResultDisplay(id, output, isErr, nil, emit)
+}
+
+func (s *Session) appendToolResultDisplay(id, output string, isErr bool, display *tool.DisplayInfo, emit func(Event)) {
 	s.history = append(s.history, provider.ToolResultMsg(id, output, isErr))
 	s.usage.charsIn += len(output)
 	// find the tool name for the event by matching the last assistant call
@@ -245,5 +256,5 @@ func (s *Session) appendToolResult(id, output string, isErr bool, emit func(Even
 			break
 		}
 	}
-	emit(ToolResultEvent{Name: name, Output: output, IsError: isErr})
+	emit(ToolResultEvent{Name: name, Output: output, IsError: isErr, Display: display})
 }
