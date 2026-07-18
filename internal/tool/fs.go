@@ -211,6 +211,9 @@ func (t *TreeTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 			if skipDirs[e.Name()] {
 				continue
 			}
+			if t.WS.ignored(t.WS.rel(filepath.Join(dir, e.Name()))) {
+				continue
+			}
 			shown = append(shown, e)
 		}
 		for i, e := range shown {
@@ -322,16 +325,24 @@ func (t *GrepTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
-	matches := 0
+	matches, files := 0, 0
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || matches >= 200 {
 			return nil
 		}
+		rel := t.WS.rel(path)
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
+			if skipDirs[d.Name()] || (path != root && t.WS.ignored(rel)) {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if t.WS.ignored(rel) {
+			return nil
+		}
+		files++
+		if t.WS.MaxFiles > 0 && files > t.WS.MaxFiles {
+			return filepath.SkipAll
 		}
 		data, err := os.ReadFile(path)
 		if err != nil || isBinary(data) {

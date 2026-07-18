@@ -13,6 +13,7 @@ type NeutralRamp struct {
 	Dim        string // secondary/dim text
 	Border     string // borders, rules
 	Background string
+	Surface    string // raised block, one warm step lighter than the background
 }
 
 var Neutrals = NeutralRamp{
@@ -20,6 +21,7 @@ var Neutrals = NeutralRamp{
 	Dim:        "#A39E94",
 	Border:     "#5C574F",
 	Background: "#1A1815",
+	Surface:    "#26221E",
 }
 
 // Danger is the shared terracotta used for errors and failure states. It is

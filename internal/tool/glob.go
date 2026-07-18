@@ -42,20 +42,30 @@ func (t *GlobTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	limit := 300
+	if t.WS.MaxFiles > 0 && t.WS.MaxFiles < limit {
+		limit = t.WS.MaxFiles
+	}
 	var matches []string
 	err = filepath.WalkDir(t.WS.Root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
+		rel := t.WS.rel(path)
 		if d.IsDir() {
-			if skipDirs[d.Name()] && path != t.WS.Root {
+			if path != t.WS.Root && (skipDirs[d.Name()] || t.WS.ignored(rel)) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		rel := t.WS.rel(path)
+		if t.WS.ignored(rel) {
+			return nil
+		}
 		if re.MatchString(rel) {
 			matches = append(matches, rel)
+			if len(matches) >= limit {
+				return filepath.SkipAll
+			}
 		}
 		return nil
 	})
@@ -66,9 +76,6 @@ func (t *GlobTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 		return "no files match " + a.Pattern, nil
 	}
 	sort.Strings(matches)
-	if len(matches) > 300 {
-		matches = matches[:300]
-	}
 	return strings.Join(matches, "\n"), nil
 }
 

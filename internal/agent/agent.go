@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/loveranmar/loyi/internal/config"
 	"github.com/loveranmar/loyi/internal/provider"
 	"github.com/loveranmar/loyi/internal/tool"
 )
@@ -26,11 +27,24 @@ type ToolResultEvent struct {
 }
 
 // PermissionEvent asks the UI to approve a mutating tool call. The UI must
-// send the decision on Reply exactly once.
+// send exactly one PermissionReply on Reply. Target is what the call acts on
+// (path, command…) so the UI can show what an always-rule would cover.
 type PermissionEvent struct {
+	Tool    string
+	Target  string
 	Summary string
-	Reply   chan bool
+	Reply   chan PermissionReply
 }
+
+// PermissionReply is the user's answer to a permission prompt.
+type PermissionReply int
+
+const (
+	ReplyDeny   PermissionReply = iota // no, this once
+	ReplyAllow                         // yes, this once
+	ReplyAlways                        // yes, and remember an allow rule
+)
+
 type DoneEvent struct{}
 type ErrorEvent struct{ Err error }
 
@@ -66,6 +80,8 @@ func (u Usage) Tokens() (in, out int, estimated bool) {
 }
 
 // AutoApprove, when true, skips the permission prompt for mutating tools.
+// Settings, when set, is consulted first: its allow/deny rules and mode can
+// resolve a call without prompting, and "always" answers persist there.
 type Session struct {
 	Provider    provider.Provider
 	Tools       *tool.Registry
@@ -73,6 +89,7 @@ type Session struct {
 	Effort      provider.Effort
 	Model       string
 	AutoApprove bool
+	Settings    *config.Settings
 
 	Workspace string
 	history   []provider.Message
@@ -174,18 +191,32 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 			emit(ToolStartEvent{Name: tc.Name, Summary: summary})
 
 			if t.Mutating(tc.Input) && !s.AutoApprove {
-				reply := make(chan bool, 1)
-				emit(PermissionEvent{Summary: summary, Reply: reply})
-				var approved bool
-				select {
-				case approved = <-reply:
-				case <-ctx.Done():
-					emit(ErrorEvent{ctx.Err()})
-					return
+				target := tool.Target(tc.Input)
+				decision := config.Ask
+				if s.Settings != nil {
+					decision = s.Settings.Decide(tc.Name, target)
 				}
-				if !approved {
-					s.appendToolResult(tc.ID, "the user declined this action. stop and ask what they'd like to do instead.", true, emit)
+				if decision == config.Deny {
+					s.appendToolResult(tc.ID, "this action is blocked by the permissions config in loyi.json. ask the user if it should be allowed.", true, emit)
 					continue
+				}
+				if decision == config.Ask {
+					reply := make(chan PermissionReply, 1)
+					emit(PermissionEvent{Tool: tc.Name, Target: target, Summary: summary, Reply: reply})
+					var r PermissionReply
+					select {
+					case r = <-reply:
+					case <-ctx.Done():
+						emit(ErrorEvent{ctx.Err()})
+						return
+					}
+					if r == ReplyDeny {
+						s.appendToolResult(tc.ID, "the user declined this action. stop and ask what they'd like to do instead.", true, emit)
+						continue
+					}
+					if r == ReplyAlways && s.Settings != nil {
+						_ = s.Settings.RememberAllow(config.RuleFor(tc.Name, target))
+					}
 				}
 			}
 

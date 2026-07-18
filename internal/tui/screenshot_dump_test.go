@@ -32,7 +32,7 @@ func TestDumpScreens(t *testing.T) {
 	newChatFor := func() *Chat {
 		cfg := &config.Config{Theme: theme.Default.Name}
 		sess := &agent.Session{Agent: agent.Agents[1]}
-		c := NewChat(cfg, sess, theme.Default)
+		c := NewChat(cfg, nil, sess, theme.Default)
 		c.Update(tea.WindowSizeMsg{Width: 64, Height: 24})
 		c.input.Focus()
 		return c
@@ -56,11 +56,11 @@ func TestDumpScreens(t *testing.T) {
 	c2.pup.SetState(mascot.Thinking)
 	dump("chat-2-working", transcript+c2.View().Content)
 
-	// 3. chat, permission prompt
+	// 3. chat, permission card
 	c3 := newChatFor()
 	c3.working = true
 	c3.stream.WriteString("i'll put together a landing page for you.")
-	c3.pending = &agent.PermissionEvent{Summary: "write index.html"}
+	c3.pending = &agent.PermissionEvent{Tool: "write", Target: "index.html", Summary: "write index.html"}
 	c3.word = "waiting on you"
 	c3.pup.SetState(mascot.Listening)
 	dump("chat-3-permission", transcript+c3.View().Content)

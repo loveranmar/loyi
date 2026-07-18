@@ -45,6 +45,7 @@ const pad = 2
 // the agent, inline (not altscreen) so history stays in the terminal.
 type Chat struct {
 	cfg   *config.Config
+	set   *config.Settings // loyi.json; nil falls back to defaults
 	sess  *agent.Session
 	th    theme.Theme
 	s     theme.Styles
@@ -86,12 +87,13 @@ type Chat struct {
 
 const loopContinue = "Continue with the task. When it is fully complete, reply with only the word: DONE"
 
-func NewChat(cfg *config.Config, sess *agent.Session, th theme.Theme) *Chat {
+func NewChat(cfg *config.Config, set *config.Settings, sess *agent.Session, th theme.Theme) *Chat {
 	in := textinput.New()
 	in.Placeholder = "what are we building?"
 	in.SetVirtualCursor(true)
 	c := &Chat{
 		cfg:        cfg,
+		set:        set,
 		sess:       sess,
 		th:         th,
 		s:          th.Styles(),
@@ -117,15 +119,33 @@ func (c *Chat) Init() tea.Cmd {
 }
 
 // banner is the header + greeting, printed once so it stays at the top of
-// scrollback. Lowercase, minimal, no provider name.
+// scrollback. Lowercase, minimal, no provider name. ui.banner in loyi.json
+// decides whether the greeting shows: always, never, or only on first run.
 func (c *Chat) banner() string {
+	head := indent(c.s.Accent.Render("loyi") + c.s.Dim.Render(" · "+c.sess.Agent.Label))
+	if !c.showGreeting() {
+		return head + "\n"
+	}
 	who := c.cfg.Name
 	greet := "hey. describe what you want to build, or /help for commands."
 	if who != "" {
 		greet = fmt.Sprintf("hey %s. describe what you want to build, or /help for commands.", who)
 	}
-	head := c.s.Accent.Render("loyi") + c.s.Dim.Render(" · "+c.sess.Agent.Label)
-	return indent(head) + "\n\n" + indent(c.s.Dim.Render(greet)) + "\n"
+	return head + "\n\n" + indent(c.s.Dim.Render(greet)) + "\n"
+}
+
+func (c *Chat) showGreeting() bool {
+	if c.set == nil {
+		return true
+	}
+	switch c.set.BannerMode() {
+	case "never":
+		return false
+	case "always":
+		return true
+	default: // first-run
+		return c.set.CreatedNow()
+	}
 }
 
 // indent prefixes a (possibly multi-line) block with the standard left pad.
@@ -138,9 +158,14 @@ func indent(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// userLine formats a user turn: dim › caret, primary text.
+// userLine formats a user turn: a subtle raised block (warm surface, one step
+// lighter than the terminal bg) with a dim › caret and full-bright text —
+// the primary visual separator between the user and loyi.
 func (c *Chat) userLine(text string) string {
-	return indent(c.s.Dim.Render("›") + " " + c.s.Text.Render(text))
+	bg := lipgloss.Color(theme.Neutrals.Surface)
+	caret := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Neutrals.Dim)).Background(bg).Render(" › ")
+	body := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Neutrals.Text)).Background(bg).Render(text + " ")
+	return indent(caret + body)
 }
 
 // loyiLine formats a loyi turn: accent ▸ caret on the first line, continuation
@@ -313,7 +338,7 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c, nil
 	}
 
-	// Permission prompt takes over the keyboard.
+	// Permission card takes over the keyboard.
 	if c.pending != nil {
 		resume := func(extra ...tea.Cmd) tea.Cmd {
 			cmds := append(extra, c.setActivity(mascot.ActThinking), c.waitEvent())
@@ -321,20 +346,21 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		switch key {
 		case "y", "enter":
-			c.pending.Reply <- true
+			c.pending.Reply <- agent.ReplyAllow
 			c.pending = nil
 			return c, resume()
 		case "a":
-			c.sess.AutoApprove = true
-			c.pending.Reply <- true
+			rule := config.RuleFor(c.pending.Tool, c.pending.Target)
+			note := fmt.Sprintf("always allowing %s — saved to %s", rule, ruleFileName(c.set))
+			c.pending.Reply <- agent.ReplyAlways
 			c.pending = nil
-			return c, resume(tea.Println(indent(c.s.Dim.Render("auto-approving tool calls for this session"))))
+			return c, resume(tea.Println("\n" + indent(c.s.Dim.Render(note))))
 		case "n", "esc":
-			c.pending.Reply <- false
+			c.pending.Reply <- agent.ReplyDeny
 			c.pending = nil
 			return c, resume()
 		case "ctrl+c":
-			c.pending.Reply <- false
+			c.pending.Reply <- agent.ReplyDeny
 			c.pending = nil
 			c.stopLoop()
 			c.working = false
@@ -636,6 +662,10 @@ func (c *Chat) View() tea.View {
 	if c.toolLine != "" {
 		b.WriteString("\n" + toolIndent() + c.s.Dim.Render(c.word+"  ") + c.s.Text.Render(c.toolLine) + "\n")
 	}
+	// pending approval renders where the action occurs, as loyi asking
+	if c.pending != nil {
+		b.WriteString("\n" + c.permissionCard() + "\n")
+	}
 
 	b.WriteString("\n\n" + c.inputBox() + "\n")
 	b.WriteString(c.statusLine())
@@ -677,6 +707,34 @@ func (c *Chat) pickerView() string {
 	return b.String()
 }
 
+// permissionCard renders the pending approval as a small bordered card in the
+// conversation flow, indented under loyi's message. Only the key letters get
+// the accent; everything else stays dim.
+func (c *Chat) permissionCard() string {
+	key := func(k, label string) string {
+		return c.s.Dim.Render("[") + c.s.Accent.Render(k) + c.s.Dim.Render("] "+label)
+	}
+	question := c.s.Dim.Render("allow " + c.pending.Summary + "?")
+	keys := key("y", "yes") + "   " + key("n", "no") + "   " + key("a", "always")
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(theme.Neutrals.Border)).
+		Padding(0, 1).
+		MarginLeft(pad + 2).
+		Render(question + "\n" + keys)
+}
+
+// ruleFileName names where an always-rule lands, for the confirmation note.
+func ruleFileName(set *config.Settings) string {
+	if set == nil || set.RuleFile() == "" {
+		return "loyi.json"
+	}
+	if _, project, hasProject := set.Sources(); hasProject && set.RuleFile() == project {
+		return "loyi.json"
+	}
+	return "~/.loyi/loyi.json"
+}
+
 // inputBox renders the caret + input inside a rounded border, one line tall.
 // The border is dim at rest and the theme accent while loyi is working.
 func (c *Chat) inputBox() string {
@@ -706,8 +764,7 @@ func (c *Chat) statusLine() string {
 
 	var left, right string
 	if c.pending != nil {
-		left = c.pup.View() + "  " + c.s.Text.Render("allow ") + c.s.Accent.Render(c.pending.Summary) + c.s.Text.Render("?")
-		right = c.s.Dim.Render("[y] yes   [n] no   [a] always")
+		left = c.pupView() + c.s.Dim.Render("waiting on you")
 	} else {
 		wordStyle := c.s.Dim
 		switch c.pup.State() {
@@ -716,7 +773,7 @@ func (c *Chat) statusLine() string {
 		case mascot.Error:
 			wordStyle = c.s.Danger
 		}
-		left = c.pup.View() + "  " + wordStyle.Render(c.word)
+		left = c.pupView() + wordStyle.Render(c.word)
 		if c.working {
 			right = c.s.Dim.Render("⌃c stop")
 		} else {
@@ -729,4 +786,13 @@ func (c *Chat) statusLine() string {
 		gap = 1
 	}
 	return lead + left + strings.Repeat(" ", gap) + right
+}
+
+// pupView is the status-line mascot (plus its gap), or nothing when loyi.json
+// turns the mascot off.
+func (c *Chat) pupView() string {
+	if c.set != nil && !c.set.MascotEnabled() {
+		return ""
+	}
+	return c.pup.View() + "  "
 }

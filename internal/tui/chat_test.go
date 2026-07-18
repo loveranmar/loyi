@@ -14,7 +14,7 @@ import (
 func testChat() *Chat {
 	cfg := &config.Config{Theme: theme.Default.Name}
 	sess := &agent.Session{Agent: agent.Agents[1]}
-	c := NewChat(cfg, sess, theme.Default)
+	c := NewChat(cfg, nil, sess, theme.Default)
 	c.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
 	return c
 }
@@ -48,8 +48,8 @@ func TestInputBoxSingleRow(t *testing.T) {
 
 func TestTurnFormatting(t *testing.T) {
 	c := testChat()
-	if got := stripANSI(c.userLine("hi")); got != "  › hi" {
-		t.Errorf("user turn = %q, want %q", got, "  › hi")
+	if got := stripANSI(c.userLine("hi")); got != "   › hi " {
+		t.Errorf("user turn = %q, want %q", got, "   › hi ")
 	}
 	if got := stripANSI(c.loyiLine("done.\nnext?")); got != "  ▸ done.\n    next?" {
 		t.Errorf("loyi turn = %q, want aligned continuation, got %q", got, got)
