@@ -57,6 +57,20 @@ type Usage struct {
 	charsOut int
 }
 
+// add folds another usage total in (e.g. a sub-agent's) — used to roll a
+// spawned team's cost up into the parent session.
+func (u *Usage) add(o Usage) {
+	u.ToolCalls += o.ToolCalls
+	u.InputTokens += o.InputTokens
+	u.OutputTokens += o.OutputTokens
+	u.CacheRead += o.CacheRead
+	u.charsIn += o.charsIn
+	u.charsOut += o.charsOut
+	if o.Reported {
+		u.Reported = true
+	}
+}
+
 // Tokens returns the input and output token totals and whether they are real
 // (provider-reported) or estimated.
 func (u Usage) Tokens() (in, out int, estimated bool) {
@@ -145,7 +159,7 @@ func (s *Session) SwitchAgent(a Agent) {
 func (s *Session) allowedTools() []tool.Tool {
 	var out []tool.Tool
 	for _, t := range s.Tools.List() {
-		if s.Agent.AllowsTool(t.Name()) {
+		if s.Agent.canUseTool(t.Name()) {
 			out = append(out, t)
 		}
 	}
@@ -248,7 +262,7 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 				s.appendToolResult(tc.ID, fmt.Sprintf("unknown tool %q", tc.Name), true, emit)
 				continue
 			}
-			if !s.Agent.AllowsTool(tc.Name) {
+			if !s.Agent.canUseTool(tc.Name) {
 				s.appendToolResult(tc.ID, fmt.Sprintf("the %s tool isn't available in %s mode", tc.Name, s.Agent.Label), true, emit)
 				continue
 			}

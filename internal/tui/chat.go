@@ -46,6 +46,7 @@ const pad = 2
 type Chat struct {
 	cfg   *config.Config
 	sess  *agent.Session
+	orch  *agent.Orchestrator
 	th    theme.Theme
 	s     theme.Styles
 	input textinput.Model
@@ -88,13 +89,14 @@ type Chat struct {
 
 const loopContinue = "Continue with the task. When it is fully complete, reply with only the word: DONE"
 
-func NewChat(cfg *config.Config, sess *agent.Session, th theme.Theme) *Chat {
+func NewChat(cfg *config.Config, sess *agent.Session, orch *agent.Orchestrator, th theme.Theme) *Chat {
 	in := textinput.New()
 	in.Placeholder = "what are we building?"
 	in.SetVirtualCursor(true)
 	c := &Chat{
 		cfg:        cfg,
 		sess:       sess,
+		orch:       orch,
 		th:         th,
 		s:          th.Styles(),
 		input:      in,

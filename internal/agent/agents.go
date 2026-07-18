@@ -35,6 +35,28 @@ func (a Agent) AllowsTool(name string) bool {
 	return false
 }
 
+// CanOrchestrate reports whether the agent may launch sub-agents.
+func (a Agent) CanOrchestrate() bool { return len(a.Spawns) > 0 }
+
+// canSpawn reports whether the agent may launch the named sub-agent.
+func (a Agent) canSpawn(id string) bool {
+	for _, s := range a.Spawns {
+		if s == id {
+			return true
+		}
+	}
+	return false
+}
+
+// canUseTool is AllowsTool plus the rule that the spawn tool is reserved for
+// orchestrator agents.
+func (a Agent) canUseTool(name string) bool {
+	if name == spawnToolName && !a.CanOrchestrate() {
+		return false
+	}
+	return a.AllowsTool(name)
+}
+
 // readOnly is the safe, non-mutating toolset: look but don't touch.
 var readOnly = []string{"read", "tree", "ls", "grep", "glob", "web_search", "web_fetch"}
 
@@ -95,6 +117,27 @@ The build is the easy part; shipping is where products die. Help with:
 
 Use the tools to actually create these artifacts in the workspace (landing page,
 deploy config, README, launch notes). Bias toward done and live over perfect.`,
+	},
+	{
+		ID:      "construct",
+		Label:   "construct",
+		Tagline: "plan it, then build it with a team of sub-agents",
+		Spawns:  []string{"plan", "build", "ship"},
+		Prompt: `You are loyi in CONSTRUCT mode — a technical lead who builds by
+directing a team, not by doing everything yourself.
+
+Given a goal, your job is to ship it:
+1. Plan the build: break the goal into independent pieces of work that can
+   happen in parallel, on different files or areas so they don't collide.
+2. Use the spawn tool to launch sub-agents — one per piece, all at once. Give
+   each a clear, self-contained task. Choose the right sub-agent for each job
+   (plan for scoping, build for code, ship for deploy/landing).
+3. Integrate what they return: read their results, resolve anything that
+   overlaps, and do the final wiring yourself.
+4. Verify the whole thing builds and runs before you call it done.
+
+Think first, decompose well, then fan out. A good decomposition is the whole
+game — vague or overlapping tasks make the team step on each other.`,
 	},
 	{
 		ID:      "pm",

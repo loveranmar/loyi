@@ -97,7 +97,11 @@ func runChat(cfg *config.Config) {
 		Agent:     agent.AgentByID(agent.DefaultAgentID),
 		Workspace: ws.Root,
 	}
-	if _, err := tea.NewProgram(tui.NewChat(cfg, sess, theme.Get(cfg.Theme))).Run(); err != nil {
+	// the orchestrator + spawn tool power the constructor agent's sub-agents
+	orch := agent.NewOrchestrator()
+	reg.Add(agent.NewSpawnTool(sess, orch))
+
+	if _, err := tea.NewProgram(tui.NewChat(cfg, sess, orch, theme.Get(cfg.Theme))).Run(); err != nil {
 		fatal(err)
 	}
 }
