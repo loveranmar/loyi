@@ -52,7 +52,7 @@ func (c *Chat) helpText() string {
 	lines := []struct{ cmd, desc string }{
 		{"/help", "show this list"},
 		{"/agent [id]", "switch persona: plan · build · ship · construct · pm"},
-		{"/agents", "show the sub-agent team the constructor is running"},
+		{"/agents", "live monitor of the sub-agent team (also ⌃t)"},
 		{"/effort [low|medium|high]", "reasoning effort (no arg shows current)"},
 		{"/permission [mode]", "how edits are gated: ask · accept-edits · auto · bypass"},
 		{"/model [id]", "pick a model (no id opens the picker across all providers)"},
@@ -119,32 +119,9 @@ func (c *Chat) agentCommand(args []string) (tea.Model, tea.Cmd) {
 	return c, tea.Println(c.s.Dim.Render("  no agent called " + id + "  ·  try /agent to list them"))
 }
 
-// teamCommand shows the sub-agent tree from the orchestrator: who's running or
-// finished, and for how long. The live view comes later; this is the snapshot.
+// teamCommand opens the live team monitor (the pyramid of sub-agents).
 func (c *Chat) teamCommand() (tea.Model, tea.Cmd) {
-	nodes := c.orch.Snapshot()
-	if len(nodes) == 0 {
-		return c, tea.Println(indent(c.s.Dim.Render("no sub-agents yet — switch to /agent construct and give it a goal")))
-	}
-	var b strings.Builder
-	b.WriteString("\n" + c.s.Text.Render("team") + "\n")
-	for _, n := range nodes {
-		dot := c.s.Dim.Render("·")
-		switch n.Status {
-		case agent.RunRunning:
-			dot = c.s.Accent.Render("●")
-		case agent.RunFailed:
-			dot = c.s.Danger.Render("✗")
-		}
-		line := "  " + dot + " " + c.s.Text.Render(padTo(n.Agent, 10)) +
-			c.s.Dim.Render(shorten(n.Task, 40)+"  ")
-		meta := elapsed(n.Elapsed())
-		if n.Status == agent.RunRunning && n.Activity != "" {
-			meta = shorten(n.Activity, 24) + " · " + meta
-		}
-		b.WriteString(line + c.s.Dim.Render(meta) + "\n")
-	}
-	return c, tea.Println(strings.TrimRight(b.String(), "\n"))
+	return c, c.openMonitor()
 }
 
 func shorten(s string, n int) string {

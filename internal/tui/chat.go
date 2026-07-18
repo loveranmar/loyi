@@ -29,6 +29,9 @@ type mascotRestMsg struct{}
 // wordTickMsg rotates the status word. gen guards against stale ticks.
 type wordTickMsg struct{ gen int }
 
+// monitorTickMsg re-renders the live team monitor while it's open.
+type monitorTickMsg struct{}
+
 // catalogMsg carries the fetched model list into the picker.
 type catalogMsg struct {
 	entries []factory.ModelEntry
@@ -71,6 +74,9 @@ type Chat struct {
 	// agent picker state
 	agentPickerActive bool
 	agentPickerIdx    int
+
+	// live team monitor
+	monitorActive bool
 
 	events   chan agent.Event
 	working  bool
@@ -159,6 +165,18 @@ func (c *Chat) wordTick() tea.Cmd {
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return wordTickMsg{gen: gen} })
 }
 
+// monitorTick drives the live team view; it re-renders a few times a second so
+// elapsed times and activity update while sub-agents work.
+func (c *Chat) monitorTick() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return monitorTickMsg{} })
+}
+
+// openMonitor shows the live team monitor.
+func (c *Chat) openMonitor() tea.Cmd {
+	c.monitorActive = true
+	return c.monitorTick()
+}
+
 // openPicker fetches the model catalog across all providers and opens the
 // picker when it arrives.
 func (c *Chat) openPicker() tea.Cmd {
@@ -243,6 +261,12 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return c, nil
 
+	case monitorTickMsg:
+		if c.monitorActive {
+			return c, c.monitorTick() // re-arm; View re-renders with fresh times
+		}
+		return c, nil
+
 	case mascotRestMsg:
 		if !c.working && (c.pup.State() == mascot.Success || c.pup.State() == mascot.Error) {
 			return c, c.setActivity(mascot.ActReady)
@@ -277,6 +301,33 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+
+	// The team monitor toggles with ctrl+t from anywhere — including mid-turn,
+	// so you can watch the team work.
+	if key == "ctrl+t" {
+		if c.monitorActive {
+			c.monitorActive = false
+			return c, nil
+		}
+		return c, c.openMonitor()
+	}
+	// While the monitor is open it owns the keyboard (except ctrl+c to stop).
+	if c.monitorActive {
+		switch key {
+		case "esc", "q", "enter":
+			c.monitorActive = false
+			return c, nil
+		case "ctrl+c":
+			c.monitorActive = false
+			if c.working && c.cancel != nil {
+				c.stopLoop()
+				c.working = false
+				c.cancel()
+				return c, tea.Sequence(tea.Println(indent(c.s.Dim.Render("interrupted"))), c.setActivity(mascot.ActReady))
+			}
+		}
+		return c, nil
+	}
 
 	// Model picker takes over the keyboard.
 	if c.pickerActive {
@@ -555,6 +606,9 @@ func (c *Chat) View() tea.View {
 	if c.agentPickerActive {
 		return tea.NewView(c.agentPickerView())
 	}
+	if c.monitorActive {
+		return tea.NewView(c.monitorView())
+	}
 
 	var b strings.Builder
 
@@ -625,6 +679,74 @@ func (c *Chat) agentPickerView() string {
 	return b.String()
 }
 
+// monitorView renders the live team pyramid: the orchestrating agent at the
+// top, its sub-agents fanned out below with status, activity, and how long each
+// has been working. It refreshes a few times a second while the team runs.
+func (c *Chat) monitorView() string {
+	nodes := c.orch.Snapshot()
+	running := 0
+	for _, n := range nodes {
+		if n.Status == agent.RunRunning {
+			running++
+		}
+	}
+
+	var b strings.Builder
+	title := c.s.Text.Render("team monitor")
+	switch {
+	case running > 0:
+		title += "   " + c.s.Accent.Render(fmt.Sprintf("%d working", running))
+	case len(nodes) > 0:
+		title += "   " + c.s.Dim.Render("all done")
+	}
+	b.WriteString(indent(title) + "\n\n")
+
+	// the root: the session's own agent, orchestrating
+	rootDot := c.s.Dim.Render("○")
+	sub := "idle"
+	if running > 0 {
+		rootDot = c.s.Accent.Render("●")
+		sub = "orchestrating the team"
+	}
+	b.WriteString(strings.Repeat(" ", pad) + rootDot + " " + c.s.Text.Render(c.sess.Agent.Label) + "  " + c.s.Dim.Render(sub) + "\n")
+
+	if len(nodes) == 0 {
+		b.WriteString("\n" + indent(c.s.Dim.Render("no sub-agents yet — switch to construct and give it a goal")))
+		b.WriteString("\n\n" + indent(c.s.Dim.Render("⌃t or esc to close")))
+		return b.String()
+	}
+
+	for i, n := range nodes {
+		conn := "├─"
+		if i == len(nodes)-1 {
+			conn = "└─"
+		}
+		var dot string
+		switch n.Status {
+		case agent.RunFailed:
+			dot = c.s.Danger.Render("✗")
+		case agent.RunDone:
+			dot = c.s.Dim.Render("✓")
+		default:
+			dot = c.s.Accent.Render("●")
+		}
+		activity := shorten(n.Task, 36)
+		switch {
+		case n.Status == agent.RunRunning && n.Activity != "":
+			activity = shorten(n.Activity, 36)
+		case n.Status == agent.RunDone:
+			activity = "done · " + shorten(n.Task, 28)
+		case n.Status == agent.RunFailed:
+			activity = "failed"
+		}
+		row := strings.Repeat(" ", pad) + c.s.Dim.Render(conn+" ") + dot + " " +
+			c.s.Text.Render(padTo(n.Agent, 9)) + c.s.Dim.Render(padTo(activity, 40)+elapsed(n.Elapsed()))
+		b.WriteString(row + "\n")
+	}
+	b.WriteString("\n" + indent(c.s.Dim.Render("live · ⌃t or esc to close")))
+	return b.String()
+}
+
 // inputBox renders the caret + input inside a rounded border. The border is
 // dim at rest and the theme accent while loyi is working.
 func (c *Chat) inputBox() string {
@@ -666,6 +788,10 @@ func (c *Chat) statusLine() string {
 			right = c.s.Dim.Render("⌃c stop")
 		} else {
 			right = c.s.Dim.Render("⏎ send   ⌃c quit")
+		}
+		// while a team runs, advertise the live monitor
+		if c.orch != nil && c.orch.Active() > 0 {
+			right = c.s.Accent.Render(fmt.Sprintf("⌃t team (%d)", c.orch.Active())) + c.s.Dim.Render("  ·  ") + right
 		}
 		// surface a looser permission mode so it's never a surprise
 		if c.sess.Perm != "" && c.sess.Perm != agent.PermAsk {
