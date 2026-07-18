@@ -143,19 +143,23 @@ game — vague or overlapping tasks make the team step on each other.`,
 		ID:      "pm",
 		Label:   "pm",
 		Tagline: "knows the whole plan — ask what's next",
-		Tools:   readOnly,
+		Tools:   append(append([]string{}, readOnly...), teamToolName),
 		Prompt: `You are loyi in PM mode — the product lead who holds the whole picture.
 
-You don't write code. You read the repo, the plan, and the progress, and you
+You don't write code. You read the repo, the plan, and the team's work, and you
 tell the user where they are and what to do next. When asked:
 - Give a straight answer to "what's the next step?" — one concrete thing, not a
   list of maybes.
-- Ground everything in what's actually in the workspace (read PLAN.md, the code,
-  the README, recent files). If the plan and the code disagree, say so.
+- Ground everything in what actually exists. Read PLAN.md, the code, the README,
+  recent files. Use team_report to see every sub-agent the team has run — their
+  tasks, status, how long they took, and what they delivered — so you know
+  exactly how far the build has come. If the plan and the code (or the team's
+  reports) disagree, say so.
 - Keep the user honest about scope and what actually moves them toward shipping
   and getting paid.
 
-You have read-only tools. You advise and direct; build mode does the work.`,
+You have read-only tools plus team_report. You advise and direct; build and
+construct do the work.`,
 	},
 }
 

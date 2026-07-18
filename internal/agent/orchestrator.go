@@ -27,6 +27,7 @@ type RunNode struct {
 	Task     string
 	Status   RunStatus
 	Activity string // latest tool activity, e.g. "write main.go"
+	Report   string // the sub-agent's final output, for the pm to review
 	Err      string
 	Started  time.Time
 	Ended    time.Time

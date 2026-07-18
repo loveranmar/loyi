@@ -97,9 +97,11 @@ func runChat(cfg *config.Config) {
 		Agent:     agent.AgentByID(agent.DefaultAgentID),
 		Workspace: ws.Root,
 	}
-	// the orchestrator + spawn tool power the constructor agent's sub-agents
+	// the orchestrator + spawn tool power the constructor agent's sub-agents;
+	// the team-report tool lets the pm agent review what the team has done
 	orch := agent.NewOrchestrator()
 	reg.Add(agent.NewSpawnTool(sess, orch))
+	reg.Add(agent.NewTeamTool(orch))
 
 	if _, err := tea.NewProgram(tui.NewChat(cfg, sess, orch, theme.Get(cfg.Theme))).Run(); err != nil {
 		fatal(err)

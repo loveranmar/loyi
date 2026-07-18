@@ -137,9 +137,11 @@ func (t *SpawnTool) Run(ctx context.Context, in json.RawMessage) (string, error)
 			if strings.TrimSpace(out) == "" {
 				out = "(no output)"
 			}
+			report := out
 			t.orch.update(node, func(n *RunNode) {
 				n.Status = RunDone
 				n.Activity = ""
+				n.Report = report
 				n.Ended = time.Now()
 			})
 			mu.Lock()

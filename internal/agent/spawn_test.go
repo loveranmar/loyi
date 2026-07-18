@@ -93,6 +93,10 @@ func TestSpawnFansOutConcurrently(t *testing.T) {
 		if n.Agent != "build" {
 			t.Errorf("node agent = %s, want build", n.Agent)
 		}
+		// the child's output is retained so the pm can review it later
+		if !strings.Contains(n.Report, "done") {
+			t.Errorf("node %d report not stored: %q", n.ID, n.Report)
+		}
 	}
 	// the children's usage folded into the parent (2 child turns + the spawn call)
 	if sess.Usage().ToolCalls < 1 {
