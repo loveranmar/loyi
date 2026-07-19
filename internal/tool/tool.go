@@ -84,6 +84,17 @@ func parseInput(input json.RawMessage, v any) error {
 	return nil
 }
 
+// Target is what a call acts on — the path, command, pattern, or query —
+// used for permission rules and transcript lines.
+func Target(input json.RawMessage) string {
+	for _, k := range []string{"path", "command", "pattern", "query"} {
+		if v := stringField(input, k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // stringField pulls a top-level string field out of raw input for summaries
 // without a full unmarshal.
 func stringField(input json.RawMessage, key string) string {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/loveranmar/loyi/internal/config"
 	"github.com/loveranmar/loyi/internal/provider"
 	"github.com/loveranmar/loyi/internal/tool"
 )
@@ -24,14 +25,30 @@ type ToolResultEvent struct {
 	Name    string
 	Output  string
 	IsError bool
+	// Display is a richer UI payload (diff, command output + exit status)
+	// from tools that implement tool.Displayer; nil otherwise.
+	Display *tool.DisplayInfo
 }
 
 // PermissionEvent asks the UI to approve a mutating tool call. The UI must
-// send the decision on Reply exactly once.
+// send exactly one PermissionReply on Reply. Target is what the call acts on
+// (path, command…) so the UI can show what an always-rule would cover.
 type PermissionEvent struct {
+	Tool    string
+	Target  string
 	Summary string
-	Reply   chan bool
+	Reply   chan PermissionReply
 }
+
+// PermissionReply is the user's answer to a permission prompt.
+type PermissionReply int
+
+const (
+	ReplyDeny   PermissionReply = iota // no, this once
+	ReplyAllow                         // yes, this once
+	ReplyAlways                        // yes, and remember an allow rule
+)
+
 type DoneEvent struct{}
 type ErrorEvent struct{ Err error }
 
@@ -110,6 +127,10 @@ func (p Perm) Label() string {
 	}
 }
 
+// Perm is the live session posture. Settings, when set, is consulted first:
+// its loyi.json allow/deny rules and mode can resolve a call without prompting,
+// and "always" answers persist there. Anything Settings leaves as "ask" falls
+// to Perm.
 type Session struct {
 	Provider provider.Provider
 	Tools    *tool.Registry
@@ -117,6 +138,7 @@ type Session struct {
 	Effort   provider.Effort
 	Model    string
 	Perm     Perm
+	Settings *config.Settings
 
 	Workspace string
 	history   []provider.Message
@@ -269,19 +291,34 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 			summary := t.Summary(tc.Input)
 			emit(ToolStartEvent{Name: tc.Name, Summary: summary})
 
-			if t.Mutating(tc.Input) && s.needsApproval(t, tc.Input) {
-				reply := make(chan bool, 1)
-				emit(PermissionEvent{Summary: summary, Reply: reply})
-				var approved bool
-				select {
-				case approved = <-reply:
-				case <-ctx.Done():
-					emit(ErrorEvent{ctx.Err()})
-					return
+			if t.Mutating(tc.Input) {
+				target := tool.Target(tc.Input)
+				decision := config.Ask
+				if s.Settings != nil {
+					decision = s.Settings.Decide(tc.Name, target)
 				}
-				if !approved {
-					s.appendToolResult(tc.ID, "the user declined this action. stop and ask what they'd like to do instead.", true, emit)
+				if decision == config.Deny {
+					s.appendToolResult(tc.ID, "this action is blocked by the permissions config in loyi.json. ask the user if it should be allowed.", true, emit)
 					continue
+				}
+				// Config left it open — fall to the live session posture.
+				if decision == config.Ask && s.needsApproval(t, tc.Input) {
+					reply := make(chan PermissionReply, 1)
+					emit(PermissionEvent{Tool: tc.Name, Target: target, Summary: summary, Reply: reply})
+					var r PermissionReply
+					select {
+					case r = <-reply:
+					case <-ctx.Done():
+						emit(ErrorEvent{ctx.Err()})
+						return
+					}
+					if r == ReplyDeny {
+						s.appendToolResult(tc.ID, "the user declined this action. stop and ask what they'd like to do instead.", true, emit)
+						continue
+					}
+					if r == ReplyAlways && s.Settings != nil {
+						_ = s.Settings.RememberAllow(config.RuleFor(tc.Name, target))
+					}
 				}
 			}
 
@@ -290,7 +327,11 @@ func (s *Session) Run(ctx context.Context, input string, emit func(Event)) {
 				s.appendToolResult(tc.ID, "error: "+err.Error(), true, emit)
 				continue
 			}
-			s.appendToolResult(tc.ID, out, false, emit)
+			var display *tool.DisplayInfo
+			if d, ok := t.(tool.Displayer); ok {
+				display = d.LastDisplay()
+			}
+			s.appendToolResultDisplay(tc.ID, out, false, display, emit)
 		}
 	}
 }
@@ -307,6 +348,10 @@ func serverToolSummary(st *provider.ServerTool) string {
 }
 
 func (s *Session) appendToolResult(id, output string, isErr bool, emit func(Event)) {
+	s.appendToolResultDisplay(id, output, isErr, nil, emit)
+}
+
+func (s *Session) appendToolResultDisplay(id, output string, isErr bool, display *tool.DisplayInfo, emit func(Event)) {
 	s.history = append(s.history, provider.ToolResultMsg(id, output, isErr))
 	s.usage.charsIn += len(output)
 	// find the tool name for the event by matching the last assistant call
@@ -321,5 +366,5 @@ func (s *Session) appendToolResult(id, output string, isErr bool, emit func(Even
 			break
 		}
 	}
-	emit(ToolResultEvent{Name: name, Output: output, IsError: isErr})
+	emit(ToolResultEvent{Name: name, Output: output, IsError: isErr, Display: display})
 }

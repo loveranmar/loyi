@@ -12,12 +12,21 @@ import (
 	"github.com/loveranmar/loyi/internal/provider"
 )
 
-// runCommand handles a /slash command typed into the chat.
+// runCommand handles a /slash command typed into the chat. The live round
+// flushes to scrollback first so command output lands below it.
 func (c *Chat) runCommand(line string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(line)
 	cmd := strings.TrimPrefix(fields[0], "/")
 	args := fields[1:]
 
+	if flush := c.flushTurn(); len(flush) > 0 {
+		model, next := c.runCommand2(cmd, args)
+		return model, tea.Sequence(append(flush, next)...)
+	}
+	return c.runCommand2(cmd, args)
+}
+
+func (c *Chat) runCommand2(cmd string, args []string) (tea.Model, tea.Cmd) {
 	switch cmd {
 	case "help", "?":
 		return c, tea.Println(c.helpText())

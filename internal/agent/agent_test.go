@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/loveranmar/loyi/internal/config"
 	"github.com/loveranmar/loyi/internal/provider"
 	"github.com/loveranmar/loyi/internal/tool"
 )
@@ -54,10 +55,18 @@ func newTestSession(t *testing.T, root string, turns [][]provider.Chunk) *Sessio
 }
 
 func collect(s *Session, input string, approve bool) []Event {
+	reply := ReplyDeny
+	if approve {
+		reply = ReplyAllow
+	}
+	return collectReply(s, input, reply)
+}
+
+func collectReply(s *Session, input string, reply PermissionReply) []Event {
 	var events []Event
 	s.Run(context.Background(), input, func(e Event) {
 		if pe, ok := e.(PermissionEvent); ok {
-			pe.Reply <- approve
+			pe.Reply <- reply
 			events = append(events, e)
 			return
 		}
@@ -115,6 +124,82 @@ func TestWriteToolFlowDenied(t *testing.T) {
 	// the model should have been told it was declined
 	if !strings.Contains(lastToolResult(s), "declined") {
 		t.Error("expected a 'declined' tool result fed back to the model")
+	}
+}
+
+func writeCall(path string) provider.ToolCall {
+	return provider.ToolCall{
+		ID: "t1", Name: "write",
+		Input: json.RawMessage(`{"path":"` + path + `","content":"x"}`),
+	}
+}
+
+func writeTurns(path string) [][]provider.Chunk {
+	return [][]provider.Chunk{
+		{{Done: true, ToolCalls: []provider.ToolCall{writeCall(path)}}},
+		{{Text: "done."}, {Done: true}},
+	}
+}
+
+func TestAllowRuleSkipsPrompt(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSession(t, dir, writeTurns("index.html"))
+	s.Settings = config.DefaultSettings()
+	s.Settings.Permissions.Allow = []string{"write:*.html"}
+
+	events := collect(s, "write it", false) // any prompt would be denied
+	if hasEvent[PermissionEvent](events) {
+		t.Error("allow rule should skip the prompt")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.html")); err != nil {
+		t.Error("file should have been written without asking")
+	}
+}
+
+func TestDenyRuleBlocksWithoutPrompt(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSession(t, dir, writeTurns("prod.env"))
+	s.Settings = config.DefaultSettings()
+	s.Settings.Permissions.Deny = []string{"write:*.env"}
+
+	events := collect(s, "write it", true) // any prompt would be approved
+	if hasEvent[PermissionEvent](events) {
+		t.Error("deny rule should skip the prompt")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "prod.env")); !os.IsNotExist(err) {
+		t.Error("file should not exist")
+	}
+	if !strings.Contains(lastToolResult(s), "blocked") {
+		t.Error("the model should be told the call was blocked")
+	}
+}
+
+func TestReadonlyModeBlocksMutations(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSession(t, dir, writeTurns("a.txt"))
+	s.Settings = config.DefaultSettings()
+	s.Settings.Permissions.Mode = "readonly"
+
+	events := collect(s, "write it", true)
+	if hasEvent[PermissionEvent](events) {
+		t.Error("readonly mode should not prompt")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a.txt")); !os.IsNotExist(err) {
+		t.Error("file should not exist in readonly mode")
+	}
+}
+
+func TestAlwaysReplyRecordsRule(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSession(t, dir, writeTurns("index.html"))
+	s.Settings = config.DefaultSettings()
+
+	collectReply(s, "write it", ReplyAlways)
+	if _, err := os.Stat(filepath.Join(dir, "index.html")); err != nil {
+		t.Error("always should approve the call")
+	}
+	if s.Settings.Decide("write", "other.html") != config.Allow {
+		t.Errorf("always should record write:*.html, allow = %v", s.Settings.Permissions.Allow)
 	}
 }
 

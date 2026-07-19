@@ -58,9 +58,13 @@ func (t *ReadTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 
 // ---- write ----
 
-type WriteTool struct{ WS *Workspace }
+type WriteTool struct {
+	WS   *Workspace
+	last *DisplayInfo
+}
 
-func (t *WriteTool) Name() string { return "write" }
+func (t *WriteTool) LastDisplay() *DisplayInfo { return t.last }
+func (t *WriteTool) Name() string              { return "write" }
 func (t *WriteTool) Description() string {
 	return "Write a file to the workspace, creating parent directories and overwriting any existing file. Use for new files."
 }
@@ -75,6 +79,7 @@ func (t *WriteTool) Summary(in json.RawMessage) string {
 	return "write " + stringField(in, "path")
 }
 func (t *WriteTool) Run(_ context.Context, in json.RawMessage) (string, error) {
+	t.last = nil
 	var a struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -86,6 +91,7 @@ func (t *WriteTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	old, _ := os.ReadFile(abs) // missing file diffs as all-new
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return "", err
 	}
@@ -96,14 +102,23 @@ func (t *WriteTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 	if len(a.Content) > 0 && !strings.HasSuffix(a.Content, "\n") {
 		n++
 	}
-	return fmt.Sprintf("wrote %s (%d lines)", t.WS.rel(abs), n), nil
+	t.last = &DisplayInfo{
+		Content: diffLines(string(old), a.Content),
+		Detail:  countNoun(n, "line"),
+		OK:      true,
+	}
+	return fmt.Sprintf("wrote %s · %s", t.WS.rel(abs), countNoun(n, "line")), nil
 }
 
 // ---- edit ----
 
-type EditTool struct{ WS *Workspace }
+type EditTool struct {
+	WS   *Workspace
+	last *DisplayInfo
+}
 
-func (t *EditTool) Name() string { return "edit" }
+func (t *EditTool) LastDisplay() *DisplayInfo { return t.last }
+func (t *EditTool) Name() string              { return "edit" }
 func (t *EditTool) Description() string {
 	return "Replace an exact string in a file. old must appear exactly once. Read the file first so old matches precisely."
 }
@@ -119,6 +134,7 @@ func (t *EditTool) Summary(in json.RawMessage) string {
 	return "edit " + stringField(in, "path")
 }
 func (t *EditTool) Run(_ context.Context, in json.RawMessage) (string, error) {
+	t.last = nil
 	var a struct {
 		Path string `json:"path"`
 		Old  string `json:"old"`
@@ -145,6 +161,17 @@ func (t *EditTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 	}
 	if err := os.WriteFile(abs, []byte(strings.Replace(s, a.Old, a.New, 1)), 0o644); err != nil {
 		return "", err
+	}
+	diff := diffLines(a.Old, a.New)
+	added, removed := diffStat(diff)
+	changed := added
+	if removed > changed {
+		changed = removed
+	}
+	t.last = &DisplayInfo{
+		Content: diff,
+		Detail:  countNoun(changed, "line") + " changed",
+		OK:      true,
 	}
 	return fmt.Sprintf("edited %s", t.WS.rel(abs)), nil
 }
@@ -205,6 +232,9 @@ func (t *TreeTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 				}
 			}
 			if skipDirs[e.Name()] {
+				continue
+			}
+			if t.WS.ignored(t.WS.rel(filepath.Join(dir, e.Name()))) {
 				continue
 			}
 			shown = append(shown, e)
@@ -318,16 +348,24 @@ func (t *GrepTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
-	matches := 0
+	matches, files := 0, 0
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || matches >= 200 {
 			return nil
 		}
+		rel := t.WS.rel(path)
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
+			if skipDirs[d.Name()] || (path != root && t.WS.ignored(rel)) {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if t.WS.ignored(rel) {
+			return nil
+		}
+		files++
+		if t.WS.MaxFiles > 0 && files > t.WS.MaxFiles {
+			return filepath.SkipAll
 		}
 		data, err := os.ReadFile(path)
 		if err != nil || isBinary(data) {

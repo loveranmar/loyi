@@ -75,7 +75,7 @@ func TestSpawnFansOutConcurrently(t *testing.T) {
 	sess.Run(context.Background(), "build me a saas", func(e Event) {
 		if pe, ok := e.(PermissionEvent); ok {
 			sawPermission = true
-			pe.Reply <- true // approve the fan-out
+			pe.Reply <- ReplyAllow // approve the fan-out
 		}
 	})
 

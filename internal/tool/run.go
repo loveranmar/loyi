@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -11,9 +12,13 @@ import (
 
 // RunTool executes a shell command in the workspace. Always mutating — every
 // command goes through the permission gate.
-type RunTool struct{ WS *Workspace }
+type RunTool struct {
+	WS   *Workspace
+	last *DisplayInfo
+}
 
-func (t *RunTool) Name() string { return "run" }
+func (t *RunTool) LastDisplay() *DisplayInfo { return t.last }
+func (t *RunTool) Name() string              { return "run" }
 func (t *RunTool) Description() string {
 	return "Run a shell command in the workspace and return its combined stdout and stderr. Use for builds, tests, git, installing deps, scaffolding."
 }
@@ -70,6 +75,7 @@ var dangerousPatterns = []string{
 }
 
 func (t *RunTool) Run(ctx context.Context, in json.RawMessage) (string, error) {
+	t.last = nil
 	var a struct {
 		Command string `json:"command"`
 	}
@@ -87,9 +93,23 @@ func (t *RunTool) Run(ctx context.Context, in json.RawMessage) (string, error) {
 	out, err := cmd.CombinedOutput()
 
 	text := strings.TrimRight(string(out), "\n")
+	display := &DisplayInfo{Content: text, Detail: "exit 0", OK: true}
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			display.Detail = fmt.Sprintf("exit %d", ee.ExitCode())
+		} else {
+			display.Detail = "failed"
+		}
+		display.OK = false
+	}
 	if ctx.Err() == context.DeadlineExceeded {
+		display.Detail = "timed out"
+		display.OK = false
+		t.last = display
 		return text + "\n\n(command timed out after 2m)", nil
 	}
+	t.last = display
 	if err != nil {
 		if text == "" {
 			text = err.Error()

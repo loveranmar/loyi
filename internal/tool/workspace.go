@@ -2,6 +2,7 @@ package tool
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -11,6 +12,13 @@ import (
 // outside the project you launched it in.
 type Workspace struct {
 	Root string
+
+	// Ignore holds extra glob patterns (context.ignore in loyi.json) that
+	// tree, glob, and grep skip on top of the built-in noise dirs. MaxFiles
+	// (context.maxFiles) caps how many files glob returns and grep scans;
+	// 0 means no limit.
+	Ignore   []string
+	MaxFiles int
 }
 
 // NewWorkspace returns a workspace rooted at an absolute, cleaned dir.
@@ -46,4 +54,20 @@ func (w *Workspace) rel(abs string) string {
 		return abs
 	}
 	return filepath.ToSlash(r)
+}
+
+// ignored reports whether a workspace-relative path matches an ignore
+// pattern. Patterns with a slash match the whole path (** crosses dirs);
+// bare patterns ("dist", "*.min.js") match the file or directory name.
+func (w *Workspace) ignored(rel string) bool {
+	for _, pat := range w.Ignore {
+		if strings.Contains(pat, "/") {
+			if re, err := globToRegexp(pat); err == nil && re.MatchString(rel) {
+				return true
+			}
+		} else if ok, _ := path.Match(pat, path.Base(rel)); ok {
+			return true
+		}
+	}
+	return false
 }

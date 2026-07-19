@@ -139,7 +139,7 @@ func runChild(ctx context.Context, child *Session, task string, node *RunNode, o
 	emit := func(e Event) {
 		switch ev := e.(type) {
 		case PermissionEvent:
-			ev.Reply <- false // autonomous: refuse anything that wants a human
+			ev.Reply <- ReplyDeny // autonomous: refuse anything that wants a human
 		case ToolStartEvent:
 			orch.update(node, func(n *RunNode) { n.Activity = ev.Summary })
 		case TextEvent:
