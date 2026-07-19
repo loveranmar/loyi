@@ -167,24 +167,6 @@ func TestFocusNavigation(t *testing.T) {
 	}
 }
 
-func TestFlushTurnCollapsesBlocks(t *testing.T) {
-	c := testChat()
-	c.toolTarget = "a.html"
-	b := c.newBlock(agent.ToolResultEvent{Name: "write",
-		Display: &tool.DisplayInfo{Content: "+ a\n+ b", Detail: "2 lines", OK: true}})
-	b.state = blockFull
-	c.appendBlock(b)
-	c.focusLastBlock()
-
-	cmds := c.flushTurn()
-	if len(cmds) != 1 || len(c.items) != 0 || c.focus != -1 {
-		t.Fatal("flush should clear the round and reset focus")
-	}
-	if b.state != blockCollapsed {
-		t.Error("flushed blocks must collapse")
-	}
-}
-
 func TestCountNoun(t *testing.T) {
 	if got := countNoun(1, "line", "lines"); got != "1 line" {
 		t.Errorf("countNoun(1) = %q, want %q", got, "1 line")

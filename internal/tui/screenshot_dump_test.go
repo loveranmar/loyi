@@ -38,71 +38,74 @@ func TestDumpScreens(t *testing.T) {
 		c.input.Focus()
 		return c
 	}
+	// seed adds the greeting + a user turn so the conversation screens have
+	// something in the viewport, like a real session.
+	seed := func(c *Chat) *Chat {
+		c.appendText(c.greeting())
+		c.appendText(c.userLine("build me a landing page"))
+		return c
+	}
 
 	// 1. chat, fresh start
-	c := newChatFor()
-	dump("chat-1-idle", c.banner()+"\n"+c.View().Content)
-
-	// transcript shared by the conversation screens
-	transcript := c.banner() + "\n" +
-		"\n" + c.userLine("build me a landing page") + "\n"
+	c := seed(newChatFor())
+	dump("chat-1-idle", c.View().Content)
 
 	// 2. chat mid-turn: streaming reply + live tool action, accent border
-	c2 := newChatFor()
+	c2 := seed(newChatFor())
 	c2.working = true
-	c2.stream.WriteString("i'll put together a landing page for you.")
+	c2.stream.WriteString("i'll put together a **landing page** for you.")
 	c2.toolLine = "writing index.html"
 	c2.toolTarget = "index.html"
 	c2.word = "sniffing…"
 	c2.pup.SetState(mascot.Thinking)
-	dump("chat-2-working", transcript+c2.View().Content)
+	dump("chat-2-working", c2.View().Content)
 
 	// 3. chat, permission card
-	c3 := newChatFor()
+	c3 := seed(newChatFor())
 	c3.working = true
 	c3.stream.WriteString("i'll put together a landing page for you.")
 	c3.pending = &agent.PermissionEvent{Tool: "write", Target: "index.html", Summary: "write index.html"}
 	c3.word = "waiting on you"
 	c3.pup.SetState(mascot.Listening)
-	dump("chat-3-permission", transcript+c3.View().Content)
+	dump("chat-3-permission", c3.View().Content)
 
 	// demoRound builds a finished round with an expandable write block.
 	diff := "+ <!doctype html>\n+ <html>\n+ <head>\n+   <title>hi</title>\n+ </head>\n+ <body>\n+   <h1>hello</h1>\n+ </body>\n+ </html>"
 	demoRound := func() (*Chat, *toolBlock) {
-		ch := newChatFor()
+		ch := seed(newChatFor())
 		ch.appendText(ch.loyiLine("i'll put together a landing page for you."))
 		ch.toolTarget = "index.html"
 		blk := ch.newBlock(agent.ToolResultEvent{Name: "write",
 			Display: &tool.DisplayInfo{Content: diff, Detail: "9 lines", OK: true}})
 		ch.appendBlock(blk)
-		ch.appendText(ch.loyiLine("done — starter landing page is in index.html.\nwant a signup form next?"))
+		ch.appendText(ch.loyiLine("done — starter landing page is in `index.html`.\nwant a signup form next?"))
 		return ch, blk
 	}
 
 	// 4. chat, finished conversation (blocks collapsed, input focused)
 	c4, _ := demoRound()
-	dump("chat-4-conversation", transcript+c4.View().Content)
+	dump("chat-4-conversation", c4.View().Content)
 
 	// 6. block focused (collapsed) — accent marker + expand hint
 	c6, _ := demoRound()
 	c6.focusLastBlock()
-	dump("chat-6-block-focused", transcript+c6.View().Content)
+	dump("chat-6-block-focused", c6.View().Content)
 
 	// 7. block peek — first lines + more hint
 	c7, b7 := demoRound()
 	c7.focusLastBlock()
 	b7.cycle(c7)
-	dump("chat-7-block-peek", transcript+c7.View().Content)
+	dump("chat-7-block-peek", c7.View().Content)
 
 	// 8. block full
 	c8, b8 := demoRound()
 	c8.focusLastBlock()
 	b8.cycle(c8)
 	b8.cycle(c8)
-	dump("chat-8-block-full", transcript+c8.View().Content)
+	dump("chat-8-block-full", c8.View().Content)
 
 	// 9. run block, full: command output with exit status
-	c9 := newChatFor()
+	c9 := seed(newChatFor())
 	c9.appendText(c9.loyiLine("tests aren't happy — one failure."))
 	c9.toolTarget = "go test ./..."
 	rb := c9.newBlock(agent.ToolResultEvent{Name: "run",
@@ -112,7 +115,7 @@ func TestDumpScreens(t *testing.T) {
 	c9.appendBlock(rb)
 	c9.focusLastBlock()
 	rb.cycle(c9)
-	dump("chat-9-run-block", transcript+c9.View().Content)
+	dump("chat-9-run-block", c9.View().Content)
 
 	// 5. model picker
 	c5 := newChatFor()
@@ -125,7 +128,7 @@ func TestDumpScreens(t *testing.T) {
 	c5.pickerIdx = 1
 	dump("chat-5-model-picker", c5.View().Content)
 
-	// 6. mascot states, all five faces
+	// mascot states, all five faces
 	s := theme.Default.Styles()
 	strip := ""
 	for _, st := range []struct {

@@ -72,6 +72,11 @@ type Styles struct {
 	Accent lipgloss.Style
 	Danger lipgloss.Style
 	Border lipgloss.Style // muted border color, for rules and boxes
+
+	// markdown emphasis styles for rendered model output
+	Bold   lipgloss.Style
+	Italic lipgloss.Style
+	Code   lipgloss.Style
 }
 
 // Styles builds the style set for this theme.
@@ -82,5 +87,8 @@ func (t Theme) Styles() Styles {
 		Accent: lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)),
 		Danger: lipgloss.NewStyle().Foreground(lipgloss.Color(Danger)),
 		Border: lipgloss.NewStyle().Foreground(lipgloss.Color(Neutrals.Border)),
+		Bold:   lipgloss.NewStyle().Foreground(lipgloss.Color(Neutrals.Text)).Bold(true),
+		Italic: lipgloss.NewStyle().Foreground(lipgloss.Color(Neutrals.Text)).Italic(true),
+		Code:   lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Background(lipgloss.Color(Neutrals.Surface)),
 	}
 }

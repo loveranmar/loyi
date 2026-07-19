@@ -12,29 +12,30 @@ import (
 	"github.com/loveranmar/loyi/internal/provider"
 )
 
-// runCommand handles a /slash command typed into the chat. The live round
-// flushes to scrollback first so command output lands below it.
+// runCommand handles a /slash command typed into the chat. Command output is
+// appended to the conversation like any other line.
 func (c *Chat) runCommand(line string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(line)
 	cmd := strings.TrimPrefix(fields[0], "/")
 	args := fields[1:]
-
-	if flush := c.flushTurn(); len(flush) > 0 {
-		model, next := c.runCommand2(cmd, args)
-		return model, tea.Sequence(append(flush, next)...)
-	}
 	return c.runCommand2(cmd, args)
 }
 
 func (c *Chat) runCommand2(cmd string, args []string) (tea.Model, tea.Cmd) {
 	switch cmd {
 	case "help", "?":
-		return c, tea.Println(c.helpText())
+		return c, c.push(c.helpText())
 	case "clear":
 		c.sess.Reset()
-		return c, tea.Sequence(tea.ClearScreen, tea.Println(c.banner()))
+		c.items = nil
+		c.focus = -1
+		if c.showGreeting() {
+			c.appendText(c.greeting())
+		}
+		c.stick = true
+		return c, nil
 	case "usage":
-		return c, tea.Println(c.usageText())
+		return c, c.push(c.usageText())
 	case "agent":
 		return c.agentCommand(args)
 	case "agents", "team", "tree":
@@ -53,7 +54,7 @@ func (c *Chat) runCommand2(cmd string, args []string) (tea.Model, tea.Cmd) {
 		c.quit = true
 		return c, tea.Quit
 	default:
-		return c, tea.Println(indent(c.s.Dim.Render("unknown command: /" + cmd + "  ·  try /help")))
+		return c, c.push(indent(c.s.Dim.Render("unknown command: /" + cmd + "  ·  try /help")))
 	}
 }
 
@@ -105,7 +106,7 @@ func (c *Chat) usageText() string {
 
 func (c *Chat) agentCommand(args []string) (tea.Model, tea.Cmd) {
 	if c.working {
-		return c, tea.Println(indent(c.s.Dim.Render("wait for the current turn to finish")))
+		return c, c.push(indent(c.s.Dim.Render("wait for the current turn to finish")))
 	}
 	if len(args) == 0 {
 		// open the interactive picker on the current agent
@@ -122,10 +123,10 @@ func (c *Chat) agentCommand(args []string) (tea.Model, tea.Cmd) {
 	for _, a := range agent.Agents {
 		if a.ID == id {
 			c.sess.SwitchAgent(a)
-			return c, tea.Println(c.s.Accent.Render("  → ") + c.s.Text.Render(a.Label) + c.s.Dim.Render(" · "+a.Tagline))
+			return c, c.push(c.s.Accent.Render("  → ") + c.s.Text.Render(a.Label) + c.s.Dim.Render(" · "+a.Tagline))
 		}
 	}
-	return c, tea.Println(c.s.Dim.Render("  no agent called " + id + "  ·  try /agent to list them"))
+	return c, c.push(c.s.Dim.Render("  no agent called " + id + "  ·  try /agent to list them"))
 }
 
 // teamCommand opens the live team monitor (the pyramid of sub-agents).
@@ -152,15 +153,15 @@ const loopMax = 25
 
 func (c *Chat) loopCommand(args []string) (tea.Model, tea.Cmd) {
 	if c.working {
-		return c, tea.Println(c.s.Dim.Render("  already working — wait for the current turn to finish"))
+		return c, c.push(c.s.Dim.Render("  already working — wait for the current turn to finish"))
 	}
 	// /loop <count> <task...>
 	if len(args) < 2 {
-		return c, tea.Println(c.s.Dim.Render("  usage: /loop <count> <task>   e.g. /loop 5 add tests until they all pass"))
+		return c, c.push(c.s.Dim.Render("  usage: /loop <count> <task>   e.g. /loop 5 add tests until they all pass"))
 	}
 	count, err := strconv.Atoi(args[0])
 	if err != nil || count < 1 {
-		return c, tea.Println(c.s.Dim.Render("  first argument must be a number of iterations, e.g. /loop 5 <task>"))
+		return c, c.push(c.s.Dim.Render("  first argument must be a number of iterations, e.g. /loop 5 <task>"))
 	}
 	if count > loopMax {
 		count = loopMax
@@ -181,14 +182,14 @@ func (c *Chat) effortCommand(args []string) (tea.Model, tea.Cmd) {
 		if cur == "" {
 			cur = "default"
 		}
-		return c, tea.Println(c.s.Dim.Render("  effort: ") + c.s.Text.Render(cur))
+		return c, c.push(c.s.Dim.Render("  effort: ") + c.s.Text.Render(cur))
 	}
 	switch args[0] {
 	case "low", "medium", "high":
 		c.sess.Effort = provider.Effort(args[0])
-		return c, tea.Println(c.s.Accent.Render("  → ") + c.s.Text.Render("effort "+args[0]))
+		return c, c.push(c.s.Accent.Render("  → ") + c.s.Text.Render("effort "+args[0]))
 	default:
-		return c, tea.Println(c.s.Dim.Render("  effort must be low, medium, or high"))
+		return c, c.push(c.s.Dim.Render("  effort must be low, medium, or high"))
 	}
 }
 
@@ -220,14 +221,14 @@ func (c *Chat) permissionCommand(args []string) (tea.Model, tea.Cmd) {
 			b.WriteString(marker + label + c.s.Dim.Render(m.desc) + "\n")
 		}
 		b.WriteString(c.s.Dim.Render("  set with /permission <mode>"))
-		return c, tea.Println(strings.TrimRight(b.String(), "\n"))
+		return c, c.push(strings.TrimRight(b.String(), "\n"))
 	}
 	mode, ok := parsePerm(args[0])
 	if !ok {
-		return c, tea.Println(indent(c.s.Dim.Render("modes: ask · accept-edits · auto · bypass")))
+		return c, c.push(indent(c.s.Dim.Render("modes: ask · accept-edits · auto · bypass")))
 	}
 	c.sess.Perm = mode
-	return c, tea.Println(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(mode.Label()) + c.s.Dim.Render(" mode")))
+	return c, c.push(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(mode.Label()) + c.s.Dim.Render(" mode")))
 }
 
 func parsePerm(s string) (agent.Perm, bool) {
@@ -246,7 +247,7 @@ func parsePerm(s string) (agent.Perm, bool) {
 
 func (c *Chat) modelCommand(args []string) (tea.Model, tea.Cmd) {
 	if c.working {
-		return c, tea.Println(indent(c.s.Dim.Render("wait for the current turn to finish")))
+		return c, c.push(indent(c.s.Dim.Render("wait for the current turn to finish")))
 	}
 	if len(args) == 0 {
 		// no id: open the interactive picker across all connected providers
@@ -254,7 +255,7 @@ func (c *Chat) modelCommand(args []string) (tea.Model, tea.Cmd) {
 	}
 	// explicit id: set it directly on the current provider
 	c.sess.Model = args[0]
-	return c, tea.Println(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(args[0]) + c.s.Dim.Render(" · "+c.providerID)))
+	return c, c.push(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(args[0]) + c.s.Dim.Render(" · "+c.providerID)))
 }
 
 func padTo(s string, n int) string {

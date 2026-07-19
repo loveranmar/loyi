@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -44,8 +45,9 @@ type reloadedMsg struct{ cfg *config.Config }
 // pad is the left margin — nothing is ever glued to the terminal edge.
 const pad = 2
 
-// Chat is loyi's interactive coding interface: a scrolling conversation with
-// the agent, inline (not altscreen) so history stays in the terminal.
+// Chat is loyi's interactive coding interface: a full-screen alt-screen app
+// with a branding header, a scrolling conversation viewport, and a pinned
+// input + status footer.
 type Chat struct {
 	cfg    *config.Config
 	set    *config.Settings // loyi.json; nil falls back to defaults
@@ -58,8 +60,14 @@ type Chat struct {
 	width  int
 	height int
 
-	// current round of conversation, kept in the managed view so tool blocks
-	// stay expandable; flushed to scrollback when the next turn starts
+	// full-screen alt-screen layout: a branding header, a scrolling viewport
+	// holding the whole conversation, and a pinned input + status footer.
+	vp          viewport.Model
+	stick       bool   // keep the viewport pinned to the bottom as content grows
+	lastContent string // last transcript set on the viewport, to avoid re-wrapping
+
+	// the whole conversation: loyi's messages and expandable tool blocks. Kept
+	// for the life of the session so blocks stay expandable and scroll back.
 	items []turnItem
 	focus int // index into items of the focused block; -1 = input
 
@@ -121,6 +129,8 @@ func NewChat(cfg *config.Config, set *config.Settings, sess *agent.Session, orch
 		providerID: cfg.DefaultProvider,
 		events:     make(chan agent.Event, 64),
 		focus:      -1,
+		vp:         viewport.New(),
+		stick:      true,
 	}
 	st := textinput.DefaultDarkStyles()
 	st.Focused.Prompt = c.s.Accent
@@ -133,23 +143,37 @@ func NewChat(cfg *config.Config, set *config.Settings, sess *agent.Session, orch
 }
 
 func (c *Chat) Init() tea.Cmd {
-	return tea.Batch(c.input.Focus(), tea.Println(c.banner()), c.pup.Init())
+	if c.showGreeting() {
+		c.appendText(c.greeting())
+	}
+	return tea.Batch(c.input.Focus(), c.pup.Init())
 }
 
-// banner is the header + greeting, printed once so it stays at the top of
-// scrollback. Lowercase, minimal, no provider name. ui.banner in loyi.json
-// decides whether the greeting shows: always, never, or only on first run.
-func (c *Chat) banner() string {
-	head := indent(c.s.Accent.Render("loyi") + c.s.Dim.Render(" · "+c.sess.Agent.Label))
-	if !c.showGreeting() {
-		return head + "\n"
+// header is the persistent branding bar at the top of the screen: the loyi
+// wordmark, the active agent, and a full-width rule.
+func (c *Chat) header() string {
+	w := c.width
+	if w < 1 {
+		w = 1
 	}
+	brand := c.s.Accent.Bold(true).Render("loyi") + c.s.Dim.Render("  ·  "+c.sess.Agent.Label)
+	rule := c.s.Border.Render(strings.Repeat("─", w))
+	return indent(brand) + "\n" + rule
+}
+
+// greeting is the one-time welcome line, added as the first transcript entry.
+func (c *Chat) greeting() string {
 	who := c.cfg.Name
 	greet := "hey. describe what you want to build, or /help for commands."
 	if who != "" {
 		greet = fmt.Sprintf("hey %s. describe what you want to build, or /help for commands.", who)
 	}
-	return head + "\n\n" + indent(c.s.Dim.Render(greet)) + "\n"
+	return indent(c.s.Dim.Render(greet))
+}
+
+// footer is the pinned bottom region: the input box and the status line.
+func (c *Chat) footer() string {
+	return c.inputBox() + "\n" + c.statusLine()
 }
 
 func (c *Chat) showGreeting() bool {
@@ -190,12 +214,12 @@ func (c *Chat) userLine(text string) string {
 // lines aligned under the text.
 func (c *Chat) loyiLine(text string) string {
 	p := strings.Repeat(" ", pad)
-	lines := strings.Split(text, "\n")
+	lines := strings.Split(renderMarkdown(text, c.s), "\n")
 	for i, ln := range lines {
 		if i == 0 {
-			lines[i] = p + c.s.Accent.Render("▸") + " " + c.s.Text.Render(ln)
+			lines[i] = p + c.s.Accent.Render("▸") + " " + ln
 		} else {
-			lines[i] = p + "  " + c.s.Text.Render(ln)
+			lines[i] = p + "  " + ln
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -272,14 +296,14 @@ func (c *Chat) pickModel(e factory.ModelEntry) (tea.Model, tea.Cmd) {
 	if e.Provider != c.providerID {
 		p, err := factory.Build(context.Background(), c.cfg, e.Provider)
 		if err != nil {
-			return c, tea.Println(indent(c.s.Danger.Render("✗ ") + c.s.Dim.Render(err.Error())))
+			return c, c.push(indent(c.s.Danger.Render("✗ ") + c.s.Dim.Render(err.Error())))
 		}
 		c.sess.Provider = p
 		c.providerID = e.Provider
 	}
 	c.sess.Model = e.Model
 	line := c.s.Accent.Render("→ ") + c.s.Text.Render(e.Model) + c.s.Dim.Render(" · "+e.Provider)
-	return c, tea.Println(indent(line))
+	return c, c.push(indent(line))
 }
 
 // connect pauses the chat, runs `loyi setup`, then reloads the config so newly
@@ -287,7 +311,7 @@ func (c *Chat) pickModel(e factory.ModelEntry) (tea.Model, tea.Cmd) {
 func (c *Chat) connect() tea.Cmd {
 	exe, err := os.Executable()
 	if err != nil {
-		return tea.Println(indent(c.s.Dim.Render("run `loyi setup` to connect a provider")))
+		return c.push(indent(c.s.Dim.Render("run `loyi setup` to connect a provider")))
 	}
 	cmd := exec.Command(exe, "setup")
 	return tea.ExecProcess(cmd, func(error) tea.Msg {
@@ -334,10 +358,10 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case catalogMsg:
 		c.pickerLoading = false
 		if msg.err != "" {
-			return c, tea.Println(indent(c.s.Dim.Render("couldn't list models: " + msg.err)))
+			return c, c.push(indent(c.s.Dim.Render("couldn't list models: " + msg.err)))
 		}
 		if len(msg.entries) == 0 {
-			return c, tea.Println(indent(c.s.Dim.Render("no models found — run /connect to add a provider")))
+			return c, c.push(indent(c.s.Dim.Render("no models found — run /connect to add a provider")))
 		}
 		c.pickerEntries = msg.entries
 		c.pickerActive = true
@@ -346,7 +370,7 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case reloadedMsg:
 		c.cfg = msg.cfg
-		return c, tea.Println(indent(c.s.Dim.Render("providers refreshed — /model to pick from them")))
+		return c, c.push(indent(c.s.Dim.Render("providers refreshed — /model to pick from them")))
 
 	case eventMsg:
 		return c.handleEvent(msg.ev)
@@ -389,7 +413,7 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				c.stopLoop()
 				c.working = false
 				c.cancel()
-				return c, tea.Sequence(tea.Println(indent(c.s.Dim.Render("interrupted"))), c.setActivity(mascot.ActReady))
+				return c, tea.Sequence(c.push(indent(c.s.Dim.Render("interrupted"))), c.setActivity(mascot.ActReady))
 			}
 		}
 		return c, nil
@@ -421,7 +445,7 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			c.agentPickerActive = false
 			a := agent.Agents[c.agentPickerIdx]
 			c.sess.SwitchAgent(a)
-			return c, tea.Println(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(a.Label) + c.s.Dim.Render(" · "+a.Tagline)))
+			return c, c.push(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(a.Label) + c.s.Dim.Render(" · "+a.Tagline)))
 		case "esc", "ctrl+c", "q":
 			c.agentPickerActive = false
 		}
@@ -485,6 +509,14 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch key {
+	case "pgup":
+		c.vp.ScrollUp(c.vp.Height() / 2)
+		c.stick = c.vp.AtBottom()
+		return c, nil
+	case "pgdown", "pgdn":
+		c.vp.ScrollDown(c.vp.Height() / 2)
+		c.stick = c.vp.AtBottom()
+		return c, nil
 	case "up":
 		return c, c.focusLastBlock()
 	case "ctrl+v":
@@ -584,7 +616,7 @@ func (c *Chat) refocusInput() tea.Cmd {
 }
 
 func (c *Chat) startTurn(text string) (tea.Model, tea.Cmd) {
-	return c, c.beginTurn(text, "\n"+c.userLine(text))
+	return c, c.beginTurn(text, c.userLine(text))
 }
 
 // beginTurn kicks off one agent turn: the previous round flushes to
@@ -604,29 +636,20 @@ func (c *Chat) beginTurn(text, echo string) tea.Cmd {
 		sess.Run(ctx, text, func(e agent.Event) { events <- e })
 	}()
 
-	cmds := c.flushTurn()
+	c.stick = true // a new turn jumps the viewport back to the bottom
 	if echo != "" {
-		cmds = append(cmds, tea.Println(echo))
+		c.appendText(echo)
 	}
-	cmds = append(cmds, c.waitEvent(), c.setActivity(mascot.ActThinking))
-	return tea.Sequence(cmds...)
+	return tea.Sequence(c.waitEvent(), c.setActivity(mascot.ActThinking))
 }
 
-// flushTurn commits the current round to scrollback — blocks collapse back to
-// single lines — and clears the live transcript.
-func (c *Chat) flushTurn() []tea.Cmd {
-	var cmds []tea.Cmd
-	for _, it := range c.items {
-		s := it.text
-		if it.block != nil {
-			it.block.state = blockCollapsed
-			s = c.blockView(it.block, false)
-		}
-		cmds = append(cmds, tea.Println("\n"+s))
-	}
-	c.items = nil
-	c.focus = -1
-	return cmds
+// push appends a line to the conversation and pins the viewport to the bottom.
+// It stands in for the old tea.Println scrollback calls; the returned nil cmd
+// keeps call sites (including inside tea.Sequence) unchanged.
+func (c *Chat) push(s string) tea.Cmd {
+	c.appendText(s)
+	c.stick = true
+	return nil
 }
 
 // activityForTool maps a tool name to the status activity: wolf verbs for
@@ -814,48 +837,76 @@ func (c *Chat) boxContentWidth() int {
 
 func (c *Chat) View() tea.View {
 	if c.quit {
-		return tea.NewView("")
+		return altView("")
 	}
 	if c.pickerActive {
-		return tea.NewView(c.pickerView())
+		return altView(c.pickerView())
 	}
 	if c.agentPickerActive {
-		return tea.NewView(c.agentPickerView())
+		return altView(c.agentPickerView())
 	}
 	if c.monitorActive {
-		return tea.NewView(c.monitorView())
+		return altView(c.monitorView())
 	}
 
-	var b strings.Builder
+	header := c.header()
+	footer := c.footer()
+	if c.pickerLoading {
+		footer += "\n" + indent(c.s.Dim.Render("listing models…"))
+	}
 
-	// the current round: loyi's messages and expandable tool blocks
+	// The viewport fills the space between the header and footer.
+	vpH := c.height - lipgloss.Height(header) - lipgloss.Height(footer) - 1
+	if vpH < 1 {
+		vpH = 1
+	}
+	c.vp.SetWidth(max(c.width, 1))
+	c.vp.SetHeight(vpH)
+
+	// Rebuild content only when it changes so scroll position survives the
+	// mascot/word ticks that re-render every couple of seconds.
+	if content := c.transcript(); content != c.lastContent {
+		c.lastContent = content
+		c.vp.SetContent(content)
+	}
+	if c.stick {
+		c.vp.GotoBottom()
+	}
+
+	return altView(header + "\n" + c.vp.View() + "\n" + footer)
+}
+
+// altView wraps content in a full-screen alt-screen view with loyi's warm
+// background, so launching loyi clears the terminal and restores it on exit.
+func altView(s string) tea.View {
+	v := tea.NewView(s)
+	v.AltScreen = true
+	v.BackgroundColor = lipgloss.Color(theme.Neutrals.Background)
+	return v
+}
+
+// transcript renders the whole conversation for the scrolling viewport: every
+// message and tool block, the live streaming text, the running tool line, and
+// any pending permission card.
+func (c *Chat) transcript() string {
+	var parts []string
 	for i, it := range c.items {
 		s := it.text
 		if it.block != nil {
 			s = c.blockView(it.block, i == c.focus)
 		}
-		b.WriteString("\n" + s + "\n")
+		parts = append(parts, s)
 	}
-	// live assistant text streams above the box until it's committed
 	if s := strings.TrimSpace(c.stream.String()); s != "" {
-		b.WriteString("\n" + c.loyiLine(s) + "\n")
+		parts = append(parts, c.loyiLine(s))
 	}
-	// running tool action, tucked under the message; resolves to a ✓ line
 	if c.toolLine != "" {
-		b.WriteString("\n" + toolIndent() + c.s.Dim.Render(c.word+"  ") + c.s.Text.Render(c.toolLine) + "\n")
+		parts = append(parts, toolIndent()+c.s.Dim.Render(c.word+"  ")+c.s.Text.Render(c.toolLine))
 	}
-	// pending approval renders where the action occurs, as loyi asking
 	if c.pending != nil {
-		b.WriteString("\n" + c.permissionCard() + "\n")
+		parts = append(parts, c.permissionCard())
 	}
-
-	b.WriteString("\n\n" + c.inputBox() + "\n")
-	b.WriteString(c.statusLine())
-	if c.pickerLoading {
-		b.WriteString("\n" + indent(c.s.Dim.Render("listing models…")))
-	}
-
-	return tea.NewView(b.String())
+	return strings.Join(parts, "\n\n")
 }
 
 // pickerView renders the model chooser: models grouped by provider, the
