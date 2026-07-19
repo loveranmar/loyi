@@ -122,6 +122,18 @@ func TestDumpScreens(t *testing.T) {
 	cl.appendText(cl.loyiLine("This is a deliberately long line of prose that should wrap onto multiple lines inside the viewport instead of running off the right edge of the window and getting cut off in the middle."))
 	dump("chat-11-wrap", cl.View().Content)
 
+	// 12. theme picker + a switched (ember) accent
+	ct := seed(newChatFor())
+	ct.themePickerActive = true
+	ct.themePickerOrig = ct.th.Name
+	for i, tm := range theme.All() {
+		if tm.Name == "ember" {
+			ct.themePickerIdx = i
+			ct.previewTheme(tm)
+		}
+	}
+	dump("chat-12-theme", ct.View().Content)
+
 	// 10. / command menu open
 	cs := seed(newChatFor())
 	cs.input.SetValue("/")

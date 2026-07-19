@@ -286,3 +286,18 @@ func lastToolResult(s *Session) string {
 	}
 	return ""
 }
+
+func TestCapToolOutput(t *testing.T) {
+	small := "just a little output"
+	if got := capToolOutput(small); got != small {
+		t.Errorf("small output should pass through unchanged")
+	}
+	big := strings.Repeat("x", maxToolOutputBytes+5000)
+	got := capToolOutput(big)
+	if len(got) >= len(big) {
+		t.Errorf("oversized output should be truncated: len %d", len(got))
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("truncated output should carry a note, got tail: %q", got[len(got)-60:])
+	}
+}

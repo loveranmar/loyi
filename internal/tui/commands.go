@@ -10,6 +10,7 @@ import (
 
 	"github.com/loveranmar/loyi/internal/agent"
 	"github.com/loveranmar/loyi/internal/provider"
+	"github.com/loveranmar/loyi/internal/theme"
 )
 
 // runCommand handles a /slash command typed into the chat. Command output is
@@ -44,6 +45,8 @@ func (c *Chat) runCommand2(cmd string, args []string) (tea.Model, tea.Cmd) {
 		return c.effortCommand(args)
 	case "permission", "permissions", "perm":
 		return c.permissionCommand(args)
+	case "theme", "themes":
+		return c.themeCommand(args)
 	case "model", "models":
 		return c.modelCommand(args)
 	case "connect", "login", "provider":
@@ -65,6 +68,7 @@ func (c *Chat) helpText() string {
 		{"/agents", "live monitor of the sub-agent team (also ⌃t)"},
 		{"/effort [low|medium|high]", "reasoning effort (no arg shows current)"},
 		{"/permission [mode]", "how edits are gated: ask · accept-edits · auto · bypass"},
+		{"/theme [name]", "change the accent color (no name opens the picker)"},
 		{"/model [id]", "pick a model (no id opens the picker across all providers)"},
 		{"/connect", "connect another provider (claude, chatgpt, api key, custom)"},
 		{"/usage", "tokens and tool calls this session (estimated)"},
@@ -132,6 +136,33 @@ func (c *Chat) agentCommand(args []string) (tea.Model, tea.Cmd) {
 // teamCommand opens the live team monitor (the pyramid of sub-agents).
 func (c *Chat) teamCommand() (tea.Model, tea.Cmd) {
 	return c, c.openMonitor()
+}
+
+// themeCommand opens the accent picker, or switches directly with an argument.
+func (c *Chat) themeCommand(args []string) (tea.Model, tea.Cmd) {
+	if len(args) == 0 {
+		c.themePickerActive = true
+		c.themePickerOrig = c.th.Name
+		c.themePickerIdx = 0
+		for i, t := range theme.All() {
+			if t.Name == c.th.Name {
+				c.themePickerIdx = i
+			}
+		}
+		return c, nil
+	}
+	name := strings.ToLower(args[0])
+	for _, t := range theme.All() {
+		if t.Name == name {
+			c.applyTheme(t)
+			return c, c.push(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(t.Name) + c.s.Dim.Render(" theme")))
+		}
+	}
+	var names []string
+	for _, t := range theme.All() {
+		names = append(names, t.Name)
+	}
+	return c, c.push(indent(c.s.Dim.Render("themes: " + strings.Join(names, " · "))))
 }
 
 func shorten(s string, n int) string {

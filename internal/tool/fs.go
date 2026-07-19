@@ -200,6 +200,10 @@ func (t *TreeTool) Summary(in json.RawMessage) string {
 
 var skipDirs = map[string]bool{".git": true, "node_modules": true, "vendor": true, "dist": true, ".next": true, "target": true}
 
+// maxTreeEntries bounds a tree so it stays a readable overview and its output
+// can't blow up the model's context on a huge directory.
+const maxTreeEntries = 800
+
 func (t *TreeTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 	var a struct {
 		Path string `json:"path"`
@@ -212,8 +216,12 @@ func (t *TreeTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
+	count, truncated := 0, false
 	var walk func(dir, prefix string)
 	walk = func(dir, prefix string) {
+		if truncated {
+			return
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			// Skip a directory we can't read (e.g. a root-owned subdir) instead
@@ -247,6 +255,11 @@ func (t *TreeTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 			shown = append(shown, e)
 		}
 		for i, e := range shown {
+			if count >= maxTreeEntries {
+				truncated = true
+				return
+			}
+			count++
 			branch, next := "├── ", prefix+"│   "
 			if i == len(shown)-1 {
 				branch, next = "└── ", prefix+"    "
@@ -263,6 +276,9 @@ func (t *TreeTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 	}
 	fmt.Fprintf(&b, "%s/\n", t.WS.rel(root))
 	walk(root, "")
+	if truncated {
+		fmt.Fprintf(&b, "… (stopped at %d entries — tree a subdirectory to see more)\n", maxTreeEntries)
+	}
 	return b.String(), nil
 }
 

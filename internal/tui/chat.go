@@ -90,6 +90,11 @@ type Chat struct {
 	agentPickerActive bool
 	agentPickerIdx    int
 
+	// theme picker state
+	themePickerActive bool
+	themePickerIdx    int
+	themePickerOrig   string // theme to restore if the picker is cancelled
+
 	// / command autocomplete state
 	slashIdx int
 
@@ -136,14 +141,36 @@ func NewChat(cfg *config.Config, set *config.Settings, sess *agent.Session, orch
 		stick:      true,
 	}
 	c.vp.SoftWrap = true // wrap long replies to the window instead of clipping them
+	c.restyleInput()
+	return c
+}
+
+// restyleInput colors the input for the current theme. Styles must be set on
+// c.input (the struct's copy) — styling the local value would be lost.
+func (c *Chat) restyleInput() {
 	st := textinput.DefaultDarkStyles()
 	st.Focused.Prompt = c.s.Accent
 	st.Focused.Text = c.s.Text       // typed text is full-bright primary
 	st.Focused.Placeholder = c.s.Dim // placeholder is dim
-	st.Cursor.Color = lipgloss.Color(th.Accent)
-	c.input.SetStyles(st) // on the struct's copy — styling `in` would be lost
+	st.Cursor.Color = lipgloss.Color(c.th.Accent)
+	c.input.SetStyles(st)
 	c.input.Prompt = "› "
-	return c
+}
+
+// previewTheme recolors the whole UI for a theme without persisting it.
+func (c *Chat) previewTheme(t theme.Theme) {
+	c.th = t
+	c.s = t.Styles()
+	c.pup.SetTheme(t)
+	c.restyleInput()
+	c.lastContent = "" // force the viewport to re-render in the new colors
+}
+
+// applyTheme switches to a theme and saves it so it sticks across launches.
+func (c *Chat) applyTheme(t theme.Theme) {
+	c.previewTheme(t)
+	c.cfg.Theme = t.Name
+	_ = c.cfg.Save()
 }
 
 func (c *Chat) Init() tea.Cmd {
@@ -194,6 +221,7 @@ var slashCommands = []slashItem{
 	{"agent", "switch persona: plan · build · ship · construct · pm"},
 	{"agents", "live monitor of the sub-agent team"},
 	{"model", "pick a model across all providers"},
+	{"theme", "change the accent color"},
 	{"effort", "reasoning effort: low · medium · high"},
 	{"permission", "how edits are gated"},
 	{"connect", "connect another provider"},
@@ -544,6 +572,28 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return c, c.push(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(a.Label) + c.s.Dim.Render(" · "+a.Tagline)))
 		case "esc", "ctrl+c", "q":
 			c.agentPickerActive = false
+		}
+		return c, nil
+	}
+
+	// Theme picker takes over the keyboard, previewing as you move.
+	if c.themePickerActive {
+		all := theme.All()
+		switch key {
+		case "up", "k":
+			c.themePickerIdx = (c.themePickerIdx + len(all) - 1) % len(all)
+			c.previewTheme(all[c.themePickerIdx])
+		case "down", "j":
+			c.themePickerIdx = (c.themePickerIdx + 1) % len(all)
+			c.previewTheme(all[c.themePickerIdx])
+		case "enter":
+			c.themePickerActive = false
+			t := all[c.themePickerIdx]
+			c.applyTheme(t)
+			return c, c.push(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(t.Name) + c.s.Dim.Render(" theme")))
+		case "esc", "ctrl+c", "q":
+			c.themePickerActive = false
+			c.previewTheme(theme.Get(c.themePickerOrig)) // revert the preview
 		}
 		return c, nil
 	}
@@ -975,6 +1025,9 @@ func (c *Chat) View() tea.View {
 	if c.agentPickerActive {
 		return altView(c.agentPickerView())
 	}
+	if c.themePickerActive {
+		return altView(c.themePickerView())
+	}
 	if c.monitorActive {
 		return altView(c.monitorView())
 	}
@@ -1011,7 +1064,8 @@ func (c *Chat) View() tea.View {
 func altView(s string) tea.View {
 	v := tea.NewView(s)
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion // enable the wheel for smooth scrolling
+	// Deliberately no mouse capture: grabbing the mouse would break kitty's
+	// copy-on-select and right-click paste. Scroll with the keyboard instead.
 	v.BackgroundColor = lipgloss.Color(theme.Neutrals.Background)
 	return v
 }
@@ -1090,6 +1144,25 @@ func (c *Chat) agentPickerView() string {
 		b.WriteString(strings.Repeat(" ", pad) + cursor + mark + label + c.s.Dim.Render(a.Tagline) + "\n")
 	}
 	b.WriteString("\n" + indent(c.s.Dim.Render("↑↓ move   ⏎ switch   esc cancel")))
+	return b.String()
+}
+
+// themePickerView renders the accent chooser with a color swatch per theme,
+// the active one marked; the whole UI previews as you move.
+func (c *Chat) themePickerView() string {
+	var b strings.Builder
+	b.WriteString(indent(c.s.Text.Render("pick your accent")) + "\n\n")
+	for i, t := range theme.All() {
+		cursor := "  "
+		name := c.s.Dim.Render(padTo(t.Name, 8))
+		if i == c.themePickerIdx {
+			cursor = c.s.Accent.Render("› ")
+			name = c.s.Text.Render(padTo(t.Name, 8))
+		}
+		swatch := lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent)).Render("●")
+		b.WriteString(strings.Repeat(" ", pad) + cursor + swatch + " " + name + "\n")
+	}
+	b.WriteString("\n" + indent(c.s.Dim.Render("↑↓ preview   ⏎ apply   esc cancel")))
 	return b.String()
 }
 

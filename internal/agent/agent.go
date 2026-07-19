@@ -351,7 +351,22 @@ func (s *Session) appendToolResult(id, output string, isErr bool, emit func(Even
 	s.appendToolResultDisplay(id, output, isErr, nil, emit)
 }
 
+// maxToolOutputBytes bounds a single tool result so an oversized output (a
+// tree of a huge directory, a giant file, a noisy command) can't push the API
+// request over its size limit and 413.
+const maxToolOutputBytes = 50_000
+
+func capToolOutput(s string) string {
+	if len(s) <= maxToolOutputBytes {
+		return s
+	}
+	return s[:maxToolOutputBytes] + fmt.Sprintf(
+		"\n\n[truncated — %d more bytes. narrow the request: a subpath, a glob, a grep pattern, or a line range.]",
+		len(s)-maxToolOutputBytes)
+}
+
 func (s *Session) appendToolResultDisplay(id, output string, isErr bool, display *tool.DisplayInfo, emit func(Event)) {
+	output = capToolOutput(output)
 	s.history = append(s.history, provider.ToolResultMsg(id, output, isErr))
 	s.usage.charsIn += len(output)
 	// find the tool name for the event by matching the last assistant call
