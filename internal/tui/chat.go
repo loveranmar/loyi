@@ -6,6 +6,8 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -98,6 +100,9 @@ type Chat struct {
 	// / command autocomplete state
 	slashIdx int
 
+	// long pastes collapsed to [Pasted text #n] placeholders; expanded on send
+	pastes []string
+
 	// live team monitor
 	monitorActive bool
 
@@ -118,6 +123,38 @@ type Chat struct {
 }
 
 const loopContinue = "Continue with the task. When it is fully complete, reply with only the word: DONE"
+
+var pasteRe = regexp.MustCompile(`\[Pasted text #(\d+)[^\]]*\]`)
+
+// pasteLimit is how many characters a paste can be before it collapses to a
+// [Pasted text #n] placeholder. Configurable via ui.paste_threshold in
+// loyi.json; defaults to 100.
+func (c *Chat) pasteLimit() int {
+	if c.set != nil {
+		return c.set.PasteThreshold()
+	}
+	return 100
+}
+
+// stashPaste stores a long paste and returns the placeholder to show in the
+// input, noting its line and character count.
+func (c *Chat) stashPaste(content string) string {
+	c.pastes = append(c.pastes, content)
+	lines := strings.Count(content, "\n") + 1
+	return fmt.Sprintf("[Pasted text #%d · %d lines · %d chars]", len(c.pastes), lines, len(content))
+}
+
+// expandPastes swaps [Pasted text #n] placeholders back to their full content
+// before the message is sent to the model; unknown refs are left as-is.
+func (c *Chat) expandPastes(s string) string {
+	return pasteRe.ReplaceAllStringFunc(s, func(m string) string {
+		n, _ := strconv.Atoi(pasteRe.FindStringSubmatch(m)[1])
+		if n >= 1 && n <= len(c.pastes) {
+			return c.pastes[n-1]
+		}
+		return m
+	})
+}
 
 func NewChat(cfg *config.Config, set *config.Settings, sess *agent.Session, orch *agent.Orchestrator, th theme.Theme) *Chat {
 	in := textinput.New()
@@ -495,6 +532,10 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if c.pickerActive || c.pending != nil {
 			return c, nil
 		}
+		// collapse a long paste to a placeholder; expanded again on send
+		if len(msg.Content) > c.pasteLimit() {
+			msg = tea.PasteMsg{Content: c.stashPaste(msg.Content)}
+		}
 		var cmd tea.Cmd
 		c.input, cmd = c.input.Update(msg)
 		return c, cmd
@@ -705,15 +746,18 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if c.working {
 			return c, nil
 		}
-		text := strings.TrimSpace(c.input.Value())
-		if text == "" {
+		shown := strings.TrimSpace(c.input.Value()) // with paste placeholders
+		if shown == "" {
 			return c, nil
 		}
+		text := strings.TrimSpace(c.expandPastes(shown)) // full text for the model
 		c.input.SetValue("")
-		if strings.HasPrefix(text, "/") {
+		c.pastes = nil
+		if strings.HasPrefix(shown, "/") {
 			return c.runCommand(text)
 		}
-		return c.startTurn(text)
+		// send the full text, but echo the collapsed placeholder in the transcript
+		return c, c.beginTurn(text, c.userLine(shown))
 	}
 
 	var cmd tea.Cmd

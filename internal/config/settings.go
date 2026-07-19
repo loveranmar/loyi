@@ -62,8 +62,9 @@ type ContextSettings struct {
 }
 
 type UISettings struct {
-	Mascot *bool  `json:"mascot"`
-	Banner string `json:"banner"` // first-run (default), always, never
+	Mascot         *bool  `json:"mascot"`
+	Banner         string `json:"banner"`          // first-run (default), always, never
+	PasteThreshold int    `json:"paste_threshold"` // chars before a paste collapses to a placeholder
 }
 
 // sources tracks where the settings came from and where new rules persist.
@@ -92,7 +93,7 @@ func DefaultSettings() *Settings {
 		Providers:   map[string]ProviderRef{},
 		Permissions: Permissions{Mode: "ask", Allow: []string{}, Deny: []string{}},
 		Context:     ContextSettings{Ignore: []string{}},
-		UI:          UISettings{Mascot: &mascot, Banner: "first-run"},
+		UI:          UISettings{Mascot: &mascot, Banner: "first-run", PasteThreshold: 100},
 	}
 }
 
@@ -183,6 +184,9 @@ func (s *Settings) overlay(o *Settings) {
 	}
 	if o.UI.Banner != "" {
 		s.UI.Banner = o.UI.Banner
+	}
+	if o.UI.PasteThreshold != 0 {
+		s.UI.PasteThreshold = o.UI.PasteThreshold
 	}
 }
 
@@ -363,6 +367,15 @@ func (s *Settings) RememberAllow(rule string) error {
 // MascotEnabled reports whether the status-line mascot should render.
 func (s *Settings) MascotEnabled() bool {
 	return s.UI.Mascot == nil || *s.UI.Mascot
+}
+
+// PasteThreshold returns the character count above which a paste collapses to
+// a placeholder, defaulting to 100 when unset.
+func (s *Settings) PasteThreshold() int {
+	if s.UI.PasteThreshold <= 0 {
+		return 100
+	}
+	return s.UI.PasteThreshold
 }
 
 // BannerMode returns the greeting behavior: first-run, always, or never.
