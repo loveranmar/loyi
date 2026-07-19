@@ -84,10 +84,24 @@ type Onboarding struct {
 	codexFlow  *auth.OpenAIFlow
 	codexSrv   *auth.CallbackServer
 
-	busy    bool
-	authErr string
-	saveErr error
+	busy                bool
+	authErr             string
+	saveErr             error
+	claudeCodeAvailable bool
 }
+
+// setupAction identifies a choice on the provider-setup screen. Using actions
+// instead of raw indices keeps dispatch stable when the Claude Code import
+// option is shown or hidden.
+type setupAction int
+
+const (
+	actImportClaudeCode setupAction = iota
+	actClaudeLogin
+	actCodexLogin
+	actAPIKey
+	actSkip
+)
 
 func NewOnboarding() *Onboarding {
 	return newApp(&config.Config{Theme: theme.Default.Name}, stepSplash)
@@ -105,6 +119,7 @@ func newApp(cfg *config.Config, start step) *Onboarding {
 	th := theme.Get(cfg.Theme)
 
 	o := &Onboarding{cfg: cfg, th: th, s: th.Styles(), step: start}
+	o.claudeCodeAvailable = auth.ClaudeCodeAvailable()
 
 	o.nameInput = newInput("your name")
 	o.nameInput.CharLimit = 32
@@ -209,14 +224,42 @@ func (o *Onboarding) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		o.finish()
 		return o, nil
 
+	case tea.PasteMsg:
+		if in := o.focusedInput(); in != nil {
+			var cmd tea.Cmd
+			*in, cmd = in.Update(msg)
+			return o, cmd
+		}
+		return o, nil
+
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
 			o.closeCodexServer()
 			return o, tea.Quit
 		}
+		if msg.String() == "ctrl+v" && o.focusedInput() != nil {
+			return o, pasteFromClipboard
+		}
 		return o.handleKey(msg)
 	}
 	return o, nil
+}
+
+// focusedInput returns the text input the current step types into, if any.
+func (o *Onboarding) focusedInput() *textinput.Model {
+	switch o.step {
+	case stepName:
+		return &o.nameInput
+	case stepClaudeAuth, stepCodexAuth:
+		return &o.authInput
+	case stepCustomURL:
+		return &o.urlInput
+	case stepCustomModel:
+		return &o.modelInput
+	case stepKey:
+		return &o.keyInput
+	}
+	return nil
 }
 
 func (o *Onboarding) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -263,14 +306,16 @@ func (o *Onboarding) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			o.setupIdx = (o.setupIdx + 1) % len(items)
 		case "enter":
 			o.authErr = ""
-			switch o.setupIdx {
-			case 0:
+			switch o.setupActions()[o.setupIdx] {
+			case actImportClaudeCode:
+				return o.importClaudeCode()
+			case actClaudeLogin:
 				return o.enterClaudeAuth()
-			case 1:
+			case actCodexLogin:
 				return o.enterCodexAuth()
-			case 2:
+			case actAPIKey:
 				o.step = stepProvider
-			case 3:
+			case actSkip:
 				o.finish()
 			}
 		}
@@ -474,13 +519,48 @@ func (o *Onboarding) closeCodexServer() {
 	}
 }
 
-func (o *Onboarding) setupItems() []string {
-	return []string{
-		"log in with claude",
-		"log in with chatgpt · personal use",
-		"use an api key",
-		"skip for now",
+// setupActions is the ordered list of choices on the setup screen. The Claude
+// Code import only appears when a login is actually available to import.
+func (o *Onboarding) setupActions() []setupAction {
+	var a []setupAction
+	if o.claudeCodeAvailable {
+		a = append(a, actImportClaudeCode)
 	}
+	return append(a, actClaudeLogin, actCodexLogin, actAPIKey, actSkip)
+}
+
+func (o *Onboarding) setupItems() []string {
+	labels := map[setupAction]string{
+		actImportClaudeCode: "import your claude code login · no browser, no rate limits",
+		actClaudeLogin:      "log in with claude",
+		actCodexLogin:       "log in with chatgpt · personal use",
+		actAPIKey:           "use an api key",
+		actSkip:             "skip for now",
+	}
+	acts := o.setupActions()
+	items := make([]string, len(acts))
+	for i, a := range acts {
+		items[i] = labels[a]
+	}
+	return items
+}
+
+// importClaudeCode reuses the subscription tokens Claude Code already stored,
+// skipping the browser OAuth flow (and its rate-limited token endpoint).
+func (o *Onboarding) importClaudeCode() (tea.Model, tea.Cmd) {
+	toks, err := auth.ImportClaudeCode()
+	if err != nil {
+		o.authErr = err.Error()
+		return o, nil
+	}
+	o.cfg.SetProvider("anthropic", &config.Provider{
+		Auth:    "oauth",
+		Access:  toks.Access,
+		Refresh: toks.Refresh,
+		Expires: toks.Expires,
+	})
+	o.finish()
+	return o, nil
 }
 
 func (o *Onboarding) finish() {
@@ -535,6 +615,9 @@ func (o *Onboarding) View() tea.View {
 		content := o.keyInput.View()
 		if apiKeyProviders[o.provIdx] == "custom" {
 			content += "\n\n" + o.s.Dim.Render("no key? just press enter")
+		}
+		if apiKeyProviders[o.provIdx] == "anthropic" {
+			content += "\n\n" + o.s.Dim.Render("a claude code token works too — run `claude setup-token` and paste what it prints")
 		}
 		body = o.page(title, content, hint)
 	case stepDone:

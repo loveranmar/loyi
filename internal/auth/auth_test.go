@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPKCEPair(t *testing.T) {
@@ -96,6 +99,132 @@ func TestAnthropicExchangeAndRefresh(t *testing.T) {
 	}
 	if gotBody["grant_type"] != "refresh_token" || gotBody["refresh_token"] != "ref-456" {
 		t.Errorf("bad refresh body: %v", gotBody)
+	}
+}
+
+func TestAnthropicExchangeRetriesRateLimit(t *testing.T) {
+	oldDelays := anthropicRetryDelays
+	anthropicRetryDelays = []time.Duration{0, 0, 0}
+	defer func() { anthropicRetryDelays = oldDelays }()
+
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "acc-retry", "refresh_token": "ref", "expires_in": 3600,
+		})
+	}))
+	defer srv.Close()
+	old := AnthropicTokenURL
+	AnthropicTokenURL = srv.URL
+	defer func() { AnthropicTokenURL = old }()
+
+	f := &AnthropicFlow{Verifier: "v"}
+	tokens, err := f.Exchange(context.Background(), "code#state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens.Access != "acc-retry" || calls != 2 {
+		t.Errorf("tokens = %+v after %d calls, want retry then success", tokens, calls)
+	}
+}
+
+func TestAnthropicExchangeNoRetryOn400(t *testing.T) {
+	oldDelays := anthropicRetryDelays
+	anthropicRetryDelays = []time.Duration{0, 0, 0}
+	defer func() { anthropicRetryDelays = oldDelays }()
+
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	old := AnthropicTokenURL
+	AnthropicTokenURL = srv.URL
+	defer func() { AnthropicTokenURL = old }()
+
+	f := &AnthropicFlow{Verifier: "v"}
+	if _, err := f.Exchange(context.Background(), "code"); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Errorf("400 was retried %d times; single-use codes must not be re-sent on client errors", calls-1)
+	}
+}
+
+func TestAnthropicExchangeFallsBackOn404(t *testing.T) {
+	oldDelays := anthropicRetryDelays
+	anthropicRetryDelays = []time.Duration{0, 0, 0}
+	defer func() { anthropicRetryDelays = oldDelays }()
+
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "acc-legacy", "refresh_token": "ref", "expires_in": 3600,
+		})
+	}))
+	defer legacy.Close()
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer primary.Close()
+
+	oldP, oldL := AnthropicTokenURL, anthropicTokenURLLegacy
+	AnthropicTokenURL, anthropicTokenURLLegacy = primary.URL, legacy.URL
+	defer func() { AnthropicTokenURL, anthropicTokenURLLegacy = oldP, oldL }()
+
+	f := &AnthropicFlow{Verifier: "v"}
+	tokens, err := f.Exchange(context.Background(), "code#state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens.Access != "acc-legacy" {
+		t.Errorf("expected fallback to legacy endpoint, got %+v", tokens)
+	}
+}
+
+func TestImportClaudeCode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".credentials.json")
+	blob, _ := json.Marshal(map[string]any{
+		"claudeAiOauth": map[string]any{
+			"accessToken":  "sk-ant-oat01-xyz",
+			"refreshToken": "ref-xyz",
+			"expiresAt":    int64(1784509603939),
+		},
+	})
+	if err := os.WriteFile(path, blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := ClaudeCodeCredsPath
+	ClaudeCodeCredsPath = path
+	defer func() { ClaudeCodeCredsPath = old }()
+
+	if !ClaudeCodeAvailable() {
+		t.Fatal("expected a login to be available")
+	}
+	toks, err := ImportClaudeCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if toks.Access != "sk-ant-oat01-xyz" || toks.Refresh != "ref-xyz" || toks.Expires != 1784509603939 {
+		t.Errorf("imported tokens wrong: %+v", toks)
+	}
+}
+
+func TestImportClaudeCodeMissing(t *testing.T) {
+	old := ClaudeCodeCredsPath
+	ClaudeCodeCredsPath = filepath.Join(t.TempDir(), "does-not-exist.json")
+	defer func() { ClaudeCodeCredsPath = old }()
+
+	if ClaudeCodeAvailable() {
+		t.Error("expected no login available")
+	}
+	if _, err := ImportClaudeCode(); err == nil {
+		t.Error("expected an error for a missing file")
 	}
 }
 

@@ -351,6 +351,14 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case eventMsg:
 		return c.handleEvent(msg.ev)
 
+	case tea.PasteMsg:
+		if c.pickerActive || c.pending != nil {
+			return c, nil
+		}
+		var cmd tea.Cmd
+		c.input, cmd = c.input.Update(msg)
+		return c, cmd
+
 	case tea.KeyPressMsg:
 		return c.handleKey(msg)
 	}
@@ -479,6 +487,8 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "up":
 		return c, c.focusLastBlock()
+	case "ctrl+v":
+		return c, pasteFromClipboard
 	case "enter":
 		if c.working {
 			return c, nil
