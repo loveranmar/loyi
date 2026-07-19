@@ -5,6 +5,7 @@ package factory
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/loveranmar/loyi/internal/auth"
 	"github.com/loveranmar/loyi/internal/config"
@@ -38,12 +39,18 @@ func Build(ctx context.Context, cfg *config.Config, id string) (provider.Provide
 
 	switch id {
 	case "anthropic":
-		return &anthropic.Client{
+		c := &anthropic.Client{
 			APIKey:  pc.APIKey,
 			Access:  pc.Access,
 			BaseURL: pc.BaseURL,
 			Model:   pc.Model,
-		}, nil
+		}
+		// `claude setup-token` mints sk-ant-oat… OAuth tokens; when one is
+		// pasted as an api key, send it as a bearer token instead.
+		if strings.HasPrefix(pc.APIKey, "sk-ant-oat") {
+			c.APIKey, c.Access = "", pc.APIKey
+		}
+		return c, nil
 	case "chatgpt":
 		return &codex.Client{
 			Access:    pc.Access,
