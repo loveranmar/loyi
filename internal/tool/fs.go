@@ -212,11 +212,18 @@ func (t *TreeTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
-	var walk func(dir, prefix string) error
-	walk = func(dir, prefix string) error {
+	var walk func(dir, prefix string)
+	walk = func(dir, prefix string) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			return err
+			// Skip a directory we can't read (e.g. a root-owned subdir) instead
+			// of aborting the whole tree; note why it shows up empty.
+			msg := "unreadable"
+			if os.IsPermission(err) {
+				msg = "permission denied"
+			}
+			fmt.Fprintf(&b, "%s└── (%s)\n", prefix, msg)
+			return
 		}
 		sort.Slice(entries, func(i, j int) bool {
 			if entries[i].IsDir() != entries[j].IsDir() {
@@ -250,17 +257,12 @@ func (t *TreeTool) Run(_ context.Context, in json.RawMessage) (string, error) {
 			}
 			fmt.Fprintf(&b, "%s%s%s\n", prefix, branch, name)
 			if e.IsDir() {
-				if err := walk(filepath.Join(dir, e.Name()), next); err != nil {
-					return err
-				}
+				walk(filepath.Join(dir, e.Name()), next)
 			}
 		}
-		return nil
 	}
 	fmt.Fprintf(&b, "%s/\n", t.WS.rel(root))
-	if err := walk(root, ""); err != nil {
-		return "", err
-	}
+	walk(root, "")
 	return b.String(), nil
 }
 
