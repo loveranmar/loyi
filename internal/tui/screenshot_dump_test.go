@@ -117,6 +117,11 @@ func TestDumpScreens(t *testing.T) {
 	rb.cycle(c9)
 	dump("chat-9-run-block", c9.View().Content)
 
+	// 11. long reply — must wrap to the window, not clip
+	cl := seed(newChatFor())
+	cl.appendText(cl.loyiLine("This is a deliberately long line of prose that should wrap onto multiple lines inside the viewport instead of running off the right edge of the window and getting cut off in the middle."))
+	dump("chat-11-wrap", cl.View().Content)
+
 	// 10. / command menu open
 	cs := seed(newChatFor())
 	cs.input.SetValue("/")

@@ -135,6 +135,7 @@ func NewChat(cfg *config.Config, set *config.Settings, sess *agent.Session, orch
 		vp:         viewport.New(),
 		stick:      true,
 	}
+	c.vp.SoftWrap = true // wrap long replies to the window instead of clipping them
 	st := textinput.DefaultDarkStyles()
 	st.Focused.Prompt = c.s.Accent
 	st.Focused.Text = c.s.Text       // typed text is full-bright primary
@@ -289,19 +290,27 @@ func (c *Chat) userLine(text string) string {
 	return strings.Repeat(" ", left) + bubble
 }
 
-// loyiLine formats a loyi turn: accent ▸ caret on the first line, continuation
-// lines aligned under the text.
+// loyiLine formats a loyi turn: accent ▸ caret on the first line, with the text
+// word-wrapped to the window and continuation lines aligned under it.
 func (c *Chat) loyiLine(text string) string {
+	w := c.width - pad - 2 // room after the "▸ " / "  " prefix
+	if w < 20 {
+		w = 20
+	}
 	p := strings.Repeat(" ", pad)
-	lines := strings.Split(renderMarkdown(text, c.s), "\n")
-	for i, ln := range lines {
-		if i == 0 {
-			lines[i] = p + c.s.Accent.Render("▸") + " " + ln
-		} else {
-			lines[i] = p + "  " + ln
+	var out []string
+	first := true
+	for _, para := range strings.Split(renderMarkdown(text, c.s), "\n") {
+		for _, ln := range strings.Split(lipgloss.Wrap(para, w, ""), "\n") {
+			if first {
+				out = append(out, p+c.s.Accent.Render("▸")+" "+ln)
+				first = false
+			} else {
+				out = append(out, p+"  "+ln)
+			}
 		}
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(out, "\n")
 }
 
 // toolIndent is the left margin for tool action lines, tucked under loyi's
@@ -460,6 +469,14 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		c.input, cmd = c.input.Update(msg)
+		return c, cmd
+
+	case tea.MouseWheelMsg:
+		// let the viewport scroll a few lines per notch, then track whether
+		// we're back at the bottom so new output resumes auto-following
+		var cmd tea.Cmd
+		c.vp, cmd = c.vp.Update(msg)
+		c.stick = c.vp.AtBottom()
 		return c, cmd
 
 	case tea.KeyPressMsg:
@@ -994,6 +1011,7 @@ func (c *Chat) View() tea.View {
 func altView(s string) tea.View {
 	v := tea.NewView(s)
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion // enable the wheel for smooth scrolling
 	v.BackgroundColor = lipgloss.Color(theme.Neutrals.Background)
 	return v
 }
