@@ -90,6 +90,9 @@ type Chat struct {
 	agentPickerActive bool
 	agentPickerIdx    int
 
+	// / command autocomplete state
+	slashIdx int
+
 	// live team monitor
 	monitorActive bool
 
@@ -171,9 +174,76 @@ func (c *Chat) greeting() string {
 	return indent(c.s.Dim.Render(greet))
 }
 
-// footer is the pinned bottom region: the input box and the status line.
+// footer is the pinned bottom region: the / command menu (when open), the
+// input box, and the status line.
 func (c *Chat) footer() string {
-	return c.inputBox() + "\n" + c.statusLine()
+	var b strings.Builder
+	if matches := c.slashMatches(); len(matches) > 0 {
+		b.WriteString(c.slashMenu(matches) + "\n")
+	}
+	b.WriteString(c.inputBox() + "\n" + c.statusLine())
+	return b.String()
+}
+
+type slashItem struct{ name, desc string }
+
+// slashCommands is the list offered in the / autocomplete menu.
+var slashCommands = []slashItem{
+	{"help", "show all commands"},
+	{"agent", "switch persona: plan · build · ship · construct · pm"},
+	{"agents", "live monitor of the sub-agent team"},
+	{"model", "pick a model across all providers"},
+	{"effort", "reasoning effort: low · medium · high"},
+	{"permission", "how edits are gated"},
+	{"connect", "connect another provider"},
+	{"usage", "tokens and tool calls this session"},
+	{"loop", "run a task repeatedly until DONE"},
+	{"clear", "clear the conversation"},
+	{"quit", "leave loyi"},
+}
+
+// slashMatches returns the commands the / menu should show for what's typed,
+// or nil when it shouldn't open (no leading /, or args are already being typed).
+func (c *Chat) slashMatches() []slashItem {
+	v := c.input.Value()
+	if !strings.HasPrefix(v, "/") || strings.Contains(v, " ") {
+		return nil
+	}
+	prefix := strings.ToLower(strings.TrimPrefix(v, "/"))
+	var out []slashItem
+	for _, sc := range slashCommands {
+		if strings.HasPrefix(sc.name, prefix) {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
+func (c *Chat) clampSlash(matches []slashItem) int {
+	if c.slashIdx >= len(matches) {
+		return len(matches) - 1
+	}
+	if c.slashIdx < 0 {
+		return 0
+	}
+	return c.slashIdx
+}
+
+// slashMenu renders the / autocomplete list shown above the input box.
+func (c *Chat) slashMenu(matches []slashItem) string {
+	sel := c.clampSlash(matches)
+	var b strings.Builder
+	for i, m := range matches {
+		cursor := "  "
+		name := c.s.Dim.Render(padTo("/"+m.name, 14))
+		if i == sel {
+			cursor = c.s.Accent.Render("› ")
+			name = c.s.Text.Render(padTo("/"+m.name, 14))
+		}
+		b.WriteString(strings.Repeat(" ", pad) + cursor + name + c.s.Dim.Render(m.desc) + "\n")
+	}
+	b.WriteString(strings.Repeat(" ", pad) + c.s.Dim.Render("↑↓ choose   ⇥ complete   ⏎ run   esc dismiss"))
+	return b.String()
 }
 
 func (c *Chat) showGreeting() bool {
@@ -200,14 +270,23 @@ func indent(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// userLine formats a user turn: a subtle raised block (warm surface, one step
-// lighter than the terminal bg) with a dim › caret and full-bright text —
-// the primary visual separator between the user and loyi.
+// userLine formats a user turn as a filled bubble hugging the right edge, like
+// a chat app: your prompts sit on the right, loyi's replies on the left.
 func (c *Chat) userLine(text string) string {
-	bg := lipgloss.Color(theme.Neutrals.Surface)
-	caret := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Neutrals.Dim)).Background(bg).Render(" › ")
-	body := lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Neutrals.Text)).Background(bg).Render(text + " ")
-	return indent(caret + body)
+	bubble := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(theme.Neutrals.Text)).
+		Background(lipgloss.Color(theme.Neutrals.Surface)).
+		Padding(0, 1).
+		Render(text)
+	w := c.width
+	if w < 1 {
+		w = lipgloss.Width(bubble) + pad*2
+	}
+	left := w - pad - lipgloss.Width(bubble)
+	if left < pad {
+		left = pad
+	}
+	return strings.Repeat(" ", left) + bubble
 }
 
 // loyiLine formats a loyi turn: accent ▸ caret on the first line, continuation
@@ -508,6 +587,32 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return c.handleBlockKey(key)
 	}
 
+	// The / command menu owns up/down/tab/enter/esc while it's open.
+	if matches := c.slashMatches(); len(matches) > 0 {
+		switch key {
+		case "up":
+			c.slashIdx = (c.clampSlash(matches) + len(matches) - 1) % len(matches)
+			return c, nil
+		case "down":
+			c.slashIdx = (c.clampSlash(matches) + 1) % len(matches)
+			return c, nil
+		case "tab":
+			c.input.SetValue("/" + matches[c.clampSlash(matches)].name + " ")
+			c.slashIdx = 0
+			return c, nil
+		case "enter":
+			name := matches[c.clampSlash(matches)].name
+			c.input.SetValue("")
+			c.slashIdx = 0
+			return c.runCommand("/" + name)
+		case "esc":
+			c.input.SetValue("")
+			c.slashIdx = 0
+			return c, nil
+		}
+		c.slashIdx = 0 // any other key edits the input; reset the highlight
+	}
+
 	switch key {
 	case "pgup":
 		c.vp.ScrollUp(c.vp.Height() / 2)
@@ -518,6 +623,14 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		c.stick = c.vp.AtBottom()
 		return c, nil
 	case "up":
+		c.vp.ScrollUp(1)
+		c.stick = c.vp.AtBottom()
+		return c, nil
+	case "down":
+		c.vp.ScrollDown(1)
+		c.stick = c.vp.AtBottom()
+		return c, nil
+	case "tab":
 		return c, c.focusLastBlock()
 	case "ctrl+v":
 		return c, pasteFromClipboard
@@ -703,7 +816,7 @@ func (c *Chat) waitEvent() tea.Cmd {
 
 // restMascot flashes success/error, then returns the pup to idle after a beat.
 func restMascot() tea.Cmd {
-	return tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg { return mascotRestMsg{} })
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg { return mascotRestMsg{} })
 }
 
 func (c *Chat) handleEvent(ev agent.Event) (tea.Model, tea.Cmd) {
@@ -1103,9 +1216,9 @@ func (c *Chat) statusLine() string {
 		case c.working:
 			right = c.s.Dim.Render("⌃c stop")
 		case len(c.focusableItems()) > 0:
-			right = c.s.Dim.Render("↑ blocks   ⏎ send   ⌃c quit")
+			right = c.s.Dim.Render("↑↓ scroll   ⇥ blocks   ⏎ send")
 		default:
-			right = c.s.Dim.Render("⏎ send   ⌃c quit")
+			right = c.s.Dim.Render("↑↓ scroll   ⏎ send   ⌃c quit")
 		}
 		// while a team runs, advertise the live monitor
 		if c.orch != nil && c.orch.Active() > 0 {

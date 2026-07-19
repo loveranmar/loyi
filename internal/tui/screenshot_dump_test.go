@@ -117,6 +117,11 @@ func TestDumpScreens(t *testing.T) {
 	rb.cycle(c9)
 	dump("chat-9-run-block", c9.View().Content)
 
+	// 10. / command menu open
+	cs := seed(newChatFor())
+	cs.input.SetValue("/")
+	dump("chat-10-slash", cs.View().Content)
+
 	// 5. model picker
 	c5 := newChatFor()
 	c5.pickerActive = true

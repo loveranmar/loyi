@@ -49,8 +49,9 @@ func TestInputBoxSingleRow(t *testing.T) {
 
 func TestTurnFormatting(t *testing.T) {
 	c := testChat()
-	if got := stripANSI(c.userLine("hi")); got != "   › hi " {
-		t.Errorf("user turn = %q, want %q", got, "   › hi ")
+	// the user turn is a right-aligned bubble: lots of leading space, "hi" body
+	if got := stripANSI(c.userLine("hi")); strings.TrimSpace(got) != "hi" || !strings.HasPrefix(got, "          ") {
+		t.Errorf("user turn should be a right-aligned bubble, got %q", got)
 	}
 	if got := stripANSI(c.loyiLine("done.\nnext?")); got != "  ▸ done.\n    next?" {
 		t.Errorf("loyi turn = %q, want aligned continuation, got %q", got, got)
