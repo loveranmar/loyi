@@ -756,8 +756,8 @@ func (c *Chat) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if strings.HasPrefix(shown, "/") {
 			return c.runCommand(text)
 		}
-		// send the full text, but echo the collapsed placeholder in the transcript
-		return c, c.beginTurn(text, c.userLine(shown))
+		// show the real (expanded) content in the transcript and send it too
+		return c, c.beginTurn(text, c.userLine(text))
 	}
 
 	var cmd tea.Cmd

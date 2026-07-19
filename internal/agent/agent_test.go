@@ -301,3 +301,19 @@ func TestCapToolOutput(t *testing.T) {
 		t.Errorf("truncated output should carry a note, got tail: %q", got[len(got)-60:])
 	}
 }
+
+func TestRunSendsUserText(t *testing.T) {
+	s := newTestSession(t, t.TempDir(), [][]provider.Chunk{{{Done: true}}})
+	// this is what the chat passes after expanding a [Pasted text #n] placeholder
+	s.Run(context.Background(), "read this pasted secret-token-42 and summarize", func(Event) {})
+	sp := s.Provider.(*scriptProvider)
+	found := false
+	for _, m := range sp.last.Messages {
+		if m.Role == provider.RoleUser && strings.Contains(m.Content, "secret-token-42") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("user text must reach the model as a user message; got %+v", sp.last.Messages)
+	}
+}
