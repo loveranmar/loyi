@@ -26,6 +26,49 @@ func (t *RunTool) Mutating(json.RawMessage) bool { return true }
 func (t *RunTool) Summary(in json.RawMessage) string {
 	return "run " + strconvQuote(stringField(in, "command"))
 }
+
+// AutoSafe reports whether a command is safe to run without asking in "auto"
+// mode: a known read-only/build command, and nothing that looks destructive.
+// Unknown commands return false — when unsure, ask.
+func (t *RunTool) AutoSafe(in json.RawMessage) bool {
+	cmd := strings.TrimSpace(stringField(in, "command"))
+	if cmd == "" {
+		return false
+	}
+	low := strings.ToLower(cmd)
+	for _, bad := range dangerousPatterns {
+		if strings.Contains(low, bad) {
+			return false
+		}
+	}
+	// The first word must be a recognized safe command. Chained commands
+	// (&&, ;, |) fall through to false so they get a look.
+	if strings.ContainsAny(cmd, "&;|`$(") {
+		return false
+	}
+	first := strings.Fields(cmd)[0]
+	if i := strings.LastIndex(first, "/"); i >= 0 {
+		first = first[i+1:] // strip any path
+	}
+	return safeCommands[first]
+}
+
+// safeCommands are read-only or build/test commands fine to run unprompted.
+var safeCommands = map[string]bool{
+	"ls": true, "cat": true, "pwd": true, "echo": true, "head": true, "tail": true,
+	"wc": true, "which": true, "grep": true, "rg": true, "find": true, "tree": true,
+	"go": true, "gofmt": true, "node": true, "npm": true, "pnpm": true, "yarn": true,
+	"python": true, "python3": true, "pytest": true, "cargo": true, "make": true,
+	"git": true, "date": true, "env": true, "stat": true, "file": true, "diff": true,
+}
+
+// dangerousPatterns force a prompt even in auto mode.
+var dangerousPatterns = []string{
+	"rm -r", "rm -f", "rmdir", "sudo", "mkfs", "dd ", ":(){", "shutdown", "reboot",
+	"chmod -r", "chown -r", "git push", "git reset --hard", "git clean", "> /dev/",
+	"npm publish", "curl", "wget", "force", "> /etc", "truncate",
+}
+
 func (t *RunTool) Run(ctx context.Context, in json.RawMessage) (string, error) {
 	var a struct {
 		Command string `json:"command"`

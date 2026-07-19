@@ -154,12 +154,26 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	if len(system) > 0 {
 		body["system"] = system
 	}
+	// oldFetch tracks whether a beta-gated (pre-2026) web_fetch is in play.
+	oldFetch := false
 	if len(req.Tools) > 0 {
+		// loyi's client-side web_search/web_fetch are upgraded to Anthropic's
+		// server-side hosted tools here — same names, better execution. Every
+		// other tool passes through as a normal custom tool.
+		searchType, fetchType := webToolTypes(c.model(req))
 		tools := make([]map[string]any, 0, len(req.Tools))
 		for _, t := range req.Tools {
-			tools = append(tools, map[string]any{
-				"name": t.Name, "description": t.Description, "input_schema": t.Schema,
-			})
+			switch t.Name {
+			case "web_search":
+				tools = append(tools, map[string]any{"type": searchType, "name": "web_search"})
+			case "web_fetch":
+				tools = append(tools, map[string]any{"type": fetchType, "name": "web_fetch"})
+				oldFetch = fetchType == "web_fetch_20250910"
+			default:
+				tools = append(tools, map[string]any{
+					"name": t.Name, "description": t.Description, "input_schema": t.Schema,
+				})
+			}
 		}
 		body["tools"] = tools
 	}
@@ -177,11 +191,18 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	}
 	hreq.Header.Set("Content-Type", "application/json")
 	hreq.Header.Set("anthropic-version", "2023-06-01")
+	var betas []string
 	if oauth {
 		hreq.Header.Set("Authorization", "Bearer "+c.Access)
-		hreq.Header.Set("anthropic-beta", "oauth-2025-04-20,claude-code-20250219")
+		betas = append(betas, "oauth-2025-04-20", "claude-code-20250219")
 	} else {
 		hreq.Header.Set("x-api-key", c.APIKey)
+	}
+	if oldFetch {
+		betas = append(betas, "web-fetch-2025-09-10")
+	}
+	if len(betas) > 0 {
+		hreq.Header.Set("anthropic-beta", strings.Join(betas, ","))
 	}
 
 	res, err := http.DefaultClient.Do(hreq)
@@ -209,6 +230,19 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	return out, nil
 }
 
+// webToolTypes returns the server-side web_search/web_fetch tool versions for a
+// model. Newer models get the 2026 versions (built-in dynamic filtering); older
+// ones fall back to the beta-gated versions.
+func webToolTypes(model string) (search, fetch string) {
+	m := strings.ToLower(model)
+	for _, p := range []string{"opus-4-8", "opus-4-7", "opus-4-6", "sonnet-5", "sonnet-4-6", "fable-5", "mythos-5"} {
+		if strings.Contains(m, p) {
+			return "web_search_20260209", "web_fetch_20260209"
+		}
+	}
+	return "web_search_20250305", "web_fetch_20250910"
+}
+
 // anthropicStream accumulates tool_use input JSON across streamed deltas.
 type anthropicStream struct {
 	out   chan<- provider.Chunk
@@ -216,6 +250,10 @@ type anthropicStream struct {
 	cur   int // index into calls of the block currently streaming (-1 = none)
 	buf   strings.Builder
 	usage provider.Usage
+
+	// server-side tool (web_search/web_fetch) currently streaming, if any.
+	serverTool string
+	serverBuf  strings.Builder
 }
 
 func (s *anthropicStream) event(data string) bool {
@@ -257,12 +295,20 @@ func (s *anthropicStream) event(data string) bool {
 			s.usage.OutputTokens = ev.Usage.OutputTokens
 		}
 	case "content_block_start":
-		if ev.ContentBlock.Type == "tool_use" {
+		switch ev.ContentBlock.Type {
+		case "tool_use":
 			s.calls = append(s.calls, provider.ToolCall{ID: ev.ContentBlock.ID, Name: ev.ContentBlock.Name})
 			s.cur = len(s.calls) - 1
 			s.buf.Reset()
-		} else {
+			s.serverTool = ""
+		case "server_tool_use":
+			// web_search/web_fetch run on Anthropic's side; we just surface them.
+			s.serverTool = ev.ContentBlock.Name
+			s.serverBuf.Reset()
 			s.cur = -1
+		default:
+			s.cur = -1
+			s.serverTool = ""
 		}
 	case "content_block_delta":
 		switch ev.Delta.Type {
@@ -271,10 +317,18 @@ func (s *anthropicStream) event(data string) bool {
 				s.out <- provider.Chunk{Text: ev.Delta.Text}
 			}
 		case "input_json_delta":
-			s.buf.WriteString(ev.Delta.PartialJSON)
+			if s.serverTool != "" {
+				s.serverBuf.WriteString(ev.Delta.PartialJSON)
+			} else {
+				s.buf.WriteString(ev.Delta.PartialJSON)
+			}
 		}
 	case "content_block_stop":
-		if s.cur >= 0 && s.cur < len(s.calls) {
+		switch {
+		case s.serverTool != "":
+			s.out <- provider.Chunk{ServerTool: parseServerTool(s.serverTool, s.serverBuf.String())}
+			s.serverTool = ""
+		case s.cur >= 0 && s.cur < len(s.calls):
 			s.calls[s.cur].Input = json.RawMessage(s.buf.String())
 			s.cur = -1
 		}
@@ -285,6 +339,21 @@ func (s *anthropicStream) event(data string) bool {
 		return false
 	}
 	return true
+}
+
+// parseServerTool pulls the query/url out of a server tool's input so the UI
+// can show what was searched or fetched.
+func parseServerTool(name, input string) *provider.ServerTool {
+	st := &provider.ServerTool{Name: name}
+	var m map[string]any
+	if json.Unmarshal([]byte(input), &m) == nil {
+		if q, ok := m["query"].(string); ok {
+			st.Query = q
+		} else if u, ok := m["url"].(string); ok {
+			st.Query = u
+		}
+	}
+	return st
 }
 
 func (s *anthropicStream) finishedCalls() []provider.ToolCall {

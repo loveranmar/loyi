@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -25,10 +26,14 @@ func (c *Chat) runCommand(line string) (tea.Model, tea.Cmd) {
 		return c, tea.Sequence(tea.ClearScreen, tea.Println(c.banner()))
 	case "usage":
 		return c, tea.Println(c.usageText())
-	case "agent", "agents":
+	case "agent":
 		return c.agentCommand(args)
+	case "agents", "team", "tree":
+		return c.teamCommand()
 	case "effort":
 		return c.effortCommand(args)
+	case "permission", "permissions", "perm":
+		return c.permissionCommand(args)
 	case "model", "models":
 		return c.modelCommand(args)
 	case "connect", "login", "provider":
@@ -46,8 +51,10 @@ func (c *Chat) runCommand(line string) (tea.Model, tea.Cmd) {
 func (c *Chat) helpText() string {
 	lines := []struct{ cmd, desc string }{
 		{"/help", "show this list"},
-		{"/agent [id]", "switch persona: plan · build · ship (no id lists them)"},
+		{"/agent [id]", "switch persona: plan · build · ship · construct · pm"},
+		{"/agents", "live monitor of the sub-agent team (also ⌃t)"},
 		{"/effort [low|medium|high]", "reasoning effort (no arg shows current)"},
+		{"/permission [mode]", "how edits are gated: ask · accept-edits · auto · bypass"},
 		{"/model [id]", "pick a model (no id opens the picker across all providers)"},
 		{"/connect", "connect another provider (claude, chatgpt, api key, custom)"},
 		{"/usage", "tokens and tool calls this session (estimated)"},
@@ -88,20 +95,19 @@ func (c *Chat) usageText() string {
 }
 
 func (c *Chat) agentCommand(args []string) (tea.Model, tea.Cmd) {
+	if c.working {
+		return c, tea.Println(indent(c.s.Dim.Render("wait for the current turn to finish")))
+	}
 	if len(args) == 0 {
-		var b strings.Builder
-		b.WriteString("\n" + c.s.Text.Render("agents") + c.s.Dim.Render("  (you're on "+c.sess.Agent.Label+")") + "\n")
-		for _, a := range agent.Agents {
-			marker := "  "
-			label := c.s.Dim.Render(padTo(a.Label, 10))
+		// open the interactive picker on the current agent
+		c.agentPickerActive = true
+		c.agentPickerIdx = 0
+		for i, a := range agent.Agents {
 			if a.ID == c.sess.Agent.ID {
-				marker = c.s.Accent.Render("› ")
-				label = c.s.Text.Render(padTo(a.Label, 10))
+				c.agentPickerIdx = i
 			}
-			b.WriteString(marker + label + c.s.Dim.Render(a.Tagline) + "\n")
 		}
-		b.WriteString(c.s.Dim.Render("  switch with /agent <id>"))
-		return c, tea.Println(strings.TrimRight(b.String(), "\n"))
+		return c, nil
 	}
 	id := args[0]
 	for _, a := range agent.Agents {
@@ -111,6 +117,26 @@ func (c *Chat) agentCommand(args []string) (tea.Model, tea.Cmd) {
 		}
 	}
 	return c, tea.Println(c.s.Dim.Render("  no agent called " + id + "  ·  try /agent to list them"))
+}
+
+// teamCommand opens the live team monitor (the pyramid of sub-agents).
+func (c *Chat) teamCommand() (tea.Model, tea.Cmd) {
+	return c, c.openMonitor()
+}
+
+func shorten(s string, n int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	if len(s) > n {
+		return s[:n-1] + "…"
+	}
+	return s
+}
+
+func elapsed(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
 }
 
 const loopMax = 25
@@ -155,6 +181,58 @@ func (c *Chat) effortCommand(args []string) (tea.Model, tea.Cmd) {
 	default:
 		return c, tea.Println(c.s.Dim.Render("  effort must be low, medium, or high"))
 	}
+}
+
+var permModes = []struct {
+	perm agent.Perm
+	desc string
+}{
+	{agent.PermAsk, "ask before every edit and command (default)"},
+	{agent.PermAcceptEdits, "auto-accept file edits, still ask before commands"},
+	{agent.PermAuto, "auto-run what's clearly safe, ask when unsure"},
+	{agent.PermBypass, "never ask — full autonomy"},
+}
+
+func (c *Chat) permissionCommand(args []string) (tea.Model, tea.Cmd) {
+	cur := c.sess.Perm
+	if cur == "" {
+		cur = agent.PermAsk
+	}
+	if len(args) == 0 {
+		var b strings.Builder
+		b.WriteString("\n" + c.s.Text.Render("permission") + c.s.Dim.Render("  (on "+cur.Label()+")") + "\n")
+		for _, m := range permModes {
+			marker := "  "
+			label := c.s.Dim.Render(padTo(string(m.perm), 14))
+			if m.perm == cur {
+				marker = c.s.Accent.Render("› ")
+				label = c.s.Text.Render(padTo(string(m.perm), 14))
+			}
+			b.WriteString(marker + label + c.s.Dim.Render(m.desc) + "\n")
+		}
+		b.WriteString(c.s.Dim.Render("  set with /permission <mode>"))
+		return c, tea.Println(strings.TrimRight(b.String(), "\n"))
+	}
+	mode, ok := parsePerm(args[0])
+	if !ok {
+		return c, tea.Println(indent(c.s.Dim.Render("modes: ask · accept-edits · auto · bypass")))
+	}
+	c.sess.Perm = mode
+	return c, tea.Println(indent(c.s.Accent.Render("→ ") + c.s.Text.Render(mode.Label()) + c.s.Dim.Render(" mode")))
+}
+
+func parsePerm(s string) (agent.Perm, bool) {
+	switch strings.ToLower(s) {
+	case "ask", "default", "prompt":
+		return agent.PermAsk, true
+	case "accept-edits", "accept", "edits", "acceptedits":
+		return agent.PermAcceptEdits, true
+	case "auto":
+		return agent.PermAuto, true
+	case "bypass", "yolo", "full", "none":
+		return agent.PermBypass, true
+	}
+	return "", false
 }
 
 func (c *Chat) modelCommand(args []string) (tea.Model, tea.Cmd) {
